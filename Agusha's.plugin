@@ -1,8 +1,8 @@
 __id__ = "agusha"
-__name__ = "Agusha's extera"
-__description__ = "Agusha's addons"
+__name__ = "Agusha's addons"
+__description__ = "hello"
 __author__ = "@agushka"
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.7"
 
@@ -14,30 +14,32 @@ import threading
 import uuid
 import urllib.request
 import urllib.parse
-import urllib.error
+
 from java import jclass, dynamic_proxy
 from java.lang import Runnable
 from android.util import Base64
-from android.widget import EditText, LinearLayout, ScrollView, TextView, Button
-from base_plugin import BasePlugin, MethodHook, HookResult, HookStrategy, MenuItemData, MenuItemType
+from android.widget import EditText, LinearLayout, ScrollView, TextView
+
+from base_plugin import BasePlugin, MethodHook, HookResult, HookStrategy
 from hook_utils import find_class
 from android_utils import run_on_ui_thread
-from client_utils import get_last_fragment, send_request, run_on_queue
-from ui.settings import Header, Text, Switch, Divider, Input
+from client_utils import get_last_fragment, send_request
+from ui.settings import Header, Text, Switch
 from ui.alert import AlertDialogBuilder
 from ui.bulletin import BulletinHelper
 from org.telegram.messenger import UserConfig, NotificationCenter, MessageObject
 from org.telegram.tgnet import TLRPC, SerializedData
 from org.telegram.tgnet.tl import TL_stars
 
-SC = jclass("org.telegram.ui.Stars.StarsController")
-Sheet = jclass("org.telegram.ui.Stars.StarGiftSheet")
 MIN_ID = -1900000000
 MAX_ID = -1800000000
 
 
 def local_id(n):
-    return MIN_ID <= int(n) < MAX_ID
+    try:
+        return MIN_ID <= int(n) < MAX_ID
+    except Exception:
+        return False
 
 
 def field(obj, name, default=None):
@@ -93,21 +95,8 @@ def source_slug(gift):
     return ""
 
 
-def appearance_key(gift):
-    attrs = []
-    for i in range(gift.attributes.size()):
-        attr = gift.attributes.get(i)
-        kind = str(attr.getClass().getSimpleName())
-        if "AttributeBackdrop" in kind:
-            attrs.append(("backdrop", str(attr.name), int(attr.backdrop_id), int(attr.center_color),
-                          int(attr.edge_color), int(attr.pattern_color), int(attr.text_color)))
-        elif "AttributeModel" in kind or "AttributePattern" in kind:
-            attrs.append(("model" if "AttributeModel" in kind else "pattern", str(attr.name), int(attr.document.id)))
-    return str(gift.title), int(gift.num), tuple(sorted(attrs))
-
-
 def parsed_nft_link(value):
-    value = value.strip()
+    value = str(value or "").strip()
     if len(value) > 2048:
         raise ValueError("Ссылка слишком длинная")
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*", value):
@@ -115,31 +104,23 @@ def parsed_nft_link(value):
     elif value.startswith("t.me/"):
         value = "https://" + value
     u = urllib.parse.urlsplit(value)
-    if u.scheme not in ("https", "http") or u.hostname not in ("t.me", "telegram.me") or u.username or u.password or u.port not in (None, 443, 80) or u.fragment:
+    if u.scheme not in ("https", "http") or u.hostname not in ("t.me", "telegram.me"):
         raise ValueError("Нужна NFT-ссылка t.me/nft/…")
     slug = u.path.removeprefix("/nft/").rstrip("/") if u.path.startswith("/nft/") else ""
-    shared = slug.startswith("spaceterna-")
-    real = slug[len("spaceterna-"):] if shared else slug
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*", real) or real.lower().startswith(("localgift-", "spaceterna-")):
-        raise ValueError("Некорректный номер NFT")
-    q = urllib.parse.parse_qs(u.query, max_num_fields=4)
-    owner, public = 0, ""
-    if shared:
-        if set(q) != {"owner", "fn"} or any(len(v) != 1 for v in q.values()):
-            raise ValueError("Нужна полная ссылка Fake NFT с owner и fn")
-        owner = int(q["owner"][0])
-        public = q["fn"][0]
-        if not 0 < owner < 2**63 or not re.fullmatch(r"FN-[A-F0-9]{16}", public):
-            raise ValueError("Некорректный снимок Fake NFT")
-    elif q:
-        raise ValueError("Лишние параметры NFT-ссылки")
-    return real, owner, public
+    if slug.startswith("spaceterna-"):
+        slug = slug[len("spaceterna-"):]
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*", slug):
+        raise ValueError("Некорректный NFT")
+    return slug
 
 
 def trade_allowed(row, uid):
-    return (not row.get("custom", True) and not row.get("preview_only", False)
-            and row.get("owner") == uid and row.get("state", "owned") == "owned"
-            and bool(row.get("source_slug")))
+    return (
+        row.get("owner") == uid
+        and row.get("state", "owned") == "owned"
+        and not row.get("custom", True)
+        and bool(row.get("source_slug"))
+    )
 
 
 def row_active(row):
@@ -155,21 +136,11 @@ class Run(dynamic_proxy(Runnable)):
         self.fn()
 
 
-class Click(dynamic_proxy(jclass("android.view.View$OnClickListener"))):
-    def __init__(self, plugin, fn):
-        super().__init__()
-        self.plugin, self.fn = plugin, fn
-    def onClick(self, view):
-        try:
-            self.fn()
-        except Exception as e:
-            self.plugin.error(e)
-            self.plugin.info(str(e))
-
-
 class Hook(MethodHook):
     def __init__(self, plugin, before=None, after=None):
-        self.p, self.before, self.after = plugin, before, after
+        self.p = plugin
+        self.before = before
+        self.after = after
 
     def before_hooked_method(self, param):
         if self.before:
@@ -189,31 +160,26 @@ class Hook(MethodHook):
 
 
 class LocalGifts(BasePlugin):
+
+
     def on_plugin_load(self):
         self.lock = threading.RLock()
         self.status = ["Fake NFT " + __version__]
         self.errors = []
-        self.last = None
-        self.menu = None
         self.alive = True
         self.ready = False
         self.cache = {}
         self.lists = []
-        self.market_lists = []
-        self.chat_seen = {}
-        self.full_overlays = []
-        self.templates = {}
-        self.busy = set()
-        self.sync_checked = {}
+
         self.hook("org.telegram.ui.Stars.StarsController", "getProfileGiftsList", after=self.got_list)
         self.hook("org.telegram.ui.Stars.StarsController$GiftsList", "load", before=self.before_load)
         self.hook("org.telegram.messenger.NotificationCenter", "postNotificationName", before=self.notification)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "set", after=self.capture)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "onMenuPressed", before=self.menu_start, after=self.menu_end)
-        self.hook("org.telegram.ui.Components.ItemOptions", "show", before=self.menu_options)
+
         self.hook("org.telegram.messenger.MessagesController", "getUserFull", after=self.user_full)
         self.hook("org.telegram.messenger.MessagesController", "getUser", after=self.fake_profile_user)
         self.hook("org.telegram.messenger.UserConfig", "getCurrentUser", after=self.fake_profile_user)
+        self.hook("org.telegram.ui.ProfileActivity", "updateProfileData", after=self.fake_profile_fragment)
+
         normal = self.hook("org.telegram.ui.Stars.StarsController", "buyStarGift", before=self.buy_normal)
         resale = self.hook("org.telegram.ui.Stars.StarGiftSheet", "onBuyPressed", before=self.buy_unique)
         self.hook("org.telegram.ui.Stars.StarsController", "buyResellingGift", before=self.buy_resale)
@@ -221,249 +187,252 @@ class LocalGifts(BasePlugin):
         self.hook("org.telegram.ui.Stars.StarGiftSheet", "openTransfer", before=self.open_transfer)
         self.hook("org.telegram.ui.Stars.StarsController$GiftsList", "getTotalCount", after=self.total)
         self.hook("org.telegram.ui.ChatActivity", "didReceivedNotification", before=self.chat_notification)
-        # Fail closed at the transport boundary while simulation is enabled.
-        # No real gift mutation is allowed to leak from another UI entry point.
+
         guard = self.hook("org.telegram.tgnet.ConnectionsManager", "sendRequest", before=self.network_guard)
         self.ready = bool(normal and resale and guard)
         if not self.ready:
             self.set_setting("simulate", False)
+
         self.add_on_send_message_hook()
-        self.register_menus()
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "getLink", before=self.link_hook)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "onSharePressed", before=self.share_hook)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "canTransfer", after=self.can_transfer)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "onResellPressed", before=self.sell_hook)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "onUpdatePriceClick", before=self.sell_hook)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "canCraft", after=self.no_local_craft)
-        self.hook("org.telegram.ui.Stars.StarGiftSheet", "openCrafting", before=self.block_local_craft)
-        self.hook("org.telegram.messenger.browser.Browser", "openUrl", before=self.browser_link)
-        self.hook("org.telegram.ui.Gifts.ResaleGiftsFragment", "fillItems", before=self.filter_market_items)
+
 
     def hook(self, cls_name, name, before=None, after=None):
-        count = 0
-        try:
-            cls = find_class(cls_name)
-            if cls is None:
-                raise RuntimeError("Класс не найден: " + cls_name)
-            # SDK versions may return either java.lang.Class or a Chaquopy
-            # Python Java-type wrapper. Only the latter needs getClass().
-            if isinstance(cls, type):
-                cls = cls.getClass()
-            elif not callable(getattr(cls, "getDeclaredMethods", None)):
-                cls = cls.getClass()
-            for m in cls.getDeclaredMethods():
-                if str(m.getName()) != name:
-                    continue
-                try:
-                    m.setAccessible(True)
-                    handle = self.hook_method(m, Hook(self, before, after))
-                    if handle is None:
-                        raise RuntimeError("Движок не вернул дескриптор перехвата")
-                    count += 1
-                except Exception as e:
-                    self.errors.append(cls_name + "." + name + ": " + str(e)[:250])
-        except Exception as e:
-            self.errors.append(cls_name + "." + name + ": " + str(e)[:250])
-        self.status.append(name + ": " + str(count))
-        return count
+            count = 0
+            try:
+                cls = find_class(cls_name)
+                if cls is None:
+                    raise RuntimeError("Класс не найден: " + cls_name)
+                # SDK versions may return either java.lang.Class or a Chaquopy
+                # Python Java-type wrapper. Only the latter needs getClass().
+                if isinstance(cls, type):
+                    cls = cls.getClass()
+                elif not callable(getattr(cls, "getDeclaredMethods", None)):
+                    cls = cls.getClass()
+                for m in cls.getDeclaredMethods():
+                    if str(m.getName()) != name:
+                        continue
+                    try:
+                        m.setAccessible(True)
+                        handle = self.hook_method(m, Hook(self, before, after))
+                        if handle is None:
+                            raise RuntimeError("Движок не вернул дескриптор перехвата")
+                        count += 1
+                    except Exception as e:
+                        self.errors.append(cls_name + "." + name + ": " + str(e)[:250])
+            except Exception as e:
+                self.errors.append(cls_name + "." + name + ": " + str(e)[:250])
+            self.status.append(name + ": " + str(count))
+            return count
 
     def error(self, e):
-        text = str(e)[:350]
-        if text not in self.errors:
-            self.errors.append(text)
-            self.errors = self.errors[-12:]
-        self.log("Fake NFT: " + text)
+            text = str(e)[:350]
+            if text not in self.errors:
+                self.errors.append(text)
+                self.errors = self.errors[-12:]
+            self.log("Fake NFT: " + text)
 
     def info(self, text):
-        run_on_ui_thread(lambda: BulletinHelper.show_info(text) if self.alive else None)
+            run_on_ui_thread(lambda: BulletinHelper.show_info(text) if self.alive else None)
 
     def account(self):
-        return int(UserConfig.selectedAccount)
+            return int(UserConfig.selectedAccount)
 
     def uid(self, a):
-        return int(UserConfig.getInstance(a).getClientUserId())
+            return int(UserConfig.getInstance(a).getClientUserId())
 
     def key(self, a):
-        return "store_v1_" + str(self.uid(a))
+            return "store_v1_" + str(self.uid(a))
 
     def store(self, a):
         key = self.key(a)
         if key not in self.cache:
             raw = self.get_setting(key, "")
             try:
-                db = json.loads(raw) if raw else {"next": MIN_ID, "gifts": [], "events": [], "groups": []}
+                db = json.loads(raw) if raw else {"next": MIN_ID, "gifts": [], "events": [], "consumed": {}}
                 if not isinstance(db, dict) or not isinstance(db.get("gifts"), list):
                     raise ValueError("Некорректное хранилище")
-                for name, default in [("profile_order", {}), ("group_order", {}), ("groups", []),
-                                      ("consumed", {}), ("shared_profiles", {}), ("events", [])]:
-                    db.setdefault(name, default)
+                db.setdefault("next", MIN_ID)
+                db.setdefault("events", [])
+                db.setdefault("consumed", {})
                 for row in db["gifts"]:
                     row.setdefault("public_id", "FN-" + uuid.uuid4().hex[:16].upper())
-                    row.setdefault("state", "owned" if row["owner"] == self.uid(a) else "transferred")
+                    row.setdefault("state", "owned" if row.get("owner") == self.uid(a) else "transferred")
                     row.setdefault("source_slug", "")
-                    row.setdefault("custom", not bool(row["source_slug"]))
-                    row.setdefault("preview_only", False)
+                    row.setdefault("custom", not bool(row.get("source_slug")))
+                    row.setdefault("hidden", False)
+                    row.setdefault("replace", 0)
                     row.setdefault("price", 0)
-                    if row.get("data") and row.get("source", 0) > 0:
-                        g = decode(row["data"])
-                        if isinstance(g, TL_stars.TL_starGiftUnique):
-                            db["consumed"].setdefault("id:" + str(row["source"]), row["public_id"])
-                    # Legacy versions did not retain original slugs; be conservative.
-                    key_source = row.get("source_key", "")
-                    if key_source:
-                        db["consumed"].setdefault(key_source, row["public_id"])
-                db["schema"] = 3
                 self.cache[key] = db
-                if raw:
-                    self.set_setting(key, json.dumps(db, ensure_ascii=False))
             except Exception:
-                raise ValueError("Хранилище не читается. Данные не изменены.")
+                raise ValueError("Хранилище Fake NFT повреждено")
         return self.cache[key]
 
+
     def save(self, a):
-        self.set_setting(self.key(a), json.dumps(self.store(a), ensure_ascii=False))
+            self.set_setting(self.key(a), json.dumps(self.store(a), ensure_ascii=False))
 
     def next_id(self, db):
-        n = int(db["next"])
-        if n >= MAX_ID:
-            raise ValueError("Исчерпан диапазон локальных ID")
-        db["next"] = n + 1
-        return n
+            n = int(db["next"])
+            if n >= MAX_ID:
+                raise ValueError("Исчерпан диапазон локальных ID")
+            db["next"] = n + 1
+            return n
 
     def mode(self):
-        return self.ready and bool(self.get_setting("simulate", False))
+            return self.ready and bool(self.get_setting("simulate", False))
 
     def mode_changed(self, value):
-        if value and not self.ready:
-            self.set_setting("simulate", False, reload_settings=True)
-            self.info("Режим недоступен: открой диагностику совместимости.")
-        else:
-            if not value:
-                for a, li in list(self.market_lists):
-                    try:
-                        li.reload()
-                    except Exception as e:
-                        self.error(e)
-            self.info("Локальная имитация включена" if value else "Локальная имитация выключена")
+            if value and not self.ready:
+                self.set_setting("simulate", False, reload_settings=True)
+                self.info("Режим недоступен: открой диагностику совместимости.")
+            else:
+                if not value:
+                    for a, li in list(self.market_lists):
+                        try:
+                            li.reload()
+                        except Exception as e:
+                            self.error(e)
+                self.info("Локальная имитация включена" if value else "Локальная имитация выключена")
 
     def _version_tuple(self, value):
-        parts = re.findall(r"\d+", str(value or ""))
-        return tuple(int(x) for x in parts[:4]) or (0,)
+            parts = re.findall(r"\d+", str(value or ""))
+            return tuple(int(x) for x in parts[:4]) or (0,)
 
     def _github_raw_url(self):
-        repo = "spaceterna/Plugins"
-        path = "Agusha\'s.plugin"
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
-            raise ValueError("Укажи GitHub репозиторий в формате owner/repo")
-        if not path or ".." in path:
-            raise ValueError("Некорректный путь к .plugin")
-        return "https://raw.githubusercontent.com/" + repo + "/main/" + urllib.parse.quote(path, safe="/")
+            repo = "spaceterna/Plugins"
+            path = "Agusha\'s.plugin"
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+                raise ValueError("Укажи GitHub репозиторий в формате owner/repo")
+            if not path or ".." in path:
+                raise ValueError("Некорректный путь к .plugin")
+            return "https://raw.githubusercontent.com/" + repo + "/main/" + urllib.parse.quote(path, safe="/")
 
     def _download_update_source(self):
-        url = self._github_raw_url()
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Agusha-Extera/" + __version__,
-                "Accept": "text/plain,*/*",
-                "Cache-Control": "no-cache",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=20) as response:
-            raw = response.read()
-        if len(raw) < 500 or len(raw) > 5 * 1024 * 1024:
-            raise ValueError("GitHub вернул некорректный файл")
-        source = raw.decode("utf-8-sig")
-        if '__id__ = "agusha"' not in source and "__id__='agusha'" not in source:
-            raise ValueError("Это не плагин Agusha")
-        match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', source, re.M)
-        if not match:
-            raise ValueError("В обновлении не найдена __version__")
-        compile(source, "<github-update>", "exec")
-        return source, match.group(1), url
+            url = self._github_raw_url()
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Agusha-Extera/" + __version__,
+                    "Accept": "text/plain,*/*",
+                    "Cache-Control": "no-cache",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=20) as response:
+                raw = response.read()
+            if len(raw) < 500 or len(raw) > 5 * 1024 * 1024:
+                raise ValueError("GitHub вернул некорректный файл")
+            source = raw.decode("utf-8-sig")
+            if '__id__ = "agusha"' not in source and "__id__='agusha'" not in source:
+                raise ValueError("Это не плагин Agusha")
+            match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', source, re.M)
+            if not match:
+                raise ValueError("В обновлении не найдена __version__")
+            compile(source, "<github-update>", "exec")
+            return source, match.group(1), url
 
     def check_update(self, view=None):
-        self.info("Проверяю обновление…")
-        def work():
-            try:
-                source, remote_version, url = self._download_update_source()
-                newer = self._version_tuple(remote_version) > self._version_tuple(__version__)
-                def show():
-                    if newer:
-                        self.dialog(
-                            "Доступно обновление",
-                            "Текущая версия: " + __version__ + "\nНовая версия: " + remote_version,
-                            items=["Обновить", "Закрыть"],
-                            action=lambda i: self.install_update() if i == 0 else None,
-                        )
-                    elif self._version_tuple(remote_version) == self._version_tuple(__version__):
-                        self.dialog("Обновления", "Установлена актуальная версия: " + __version__)
-                    else:
-                        self.dialog(
-                            "Обновления",
-                            "На GitHub версия " + remote_version +
-                            ", а установлена " + __version__ + ". Обновление не требуется."
-                        )
-                run_on_ui_thread(show)
-            except Exception as e:
-                self.error(e)
-                self.info("Ошибка проверки: " + str(e))
-        threading.Thread(target=work, daemon=True).start()
+            self.info("Проверяю обновление…")
+            def work():
+                try:
+                    source, remote_version, url = self._download_update_source()
+                    newer = self._version_tuple(remote_version) > self._version_tuple(__version__)
+                    def show():
+                        if newer:
+                            self.dialog(
+                                "Доступно обновление",
+                                "Текущая версия: " + __version__ + "\nНовая версия: " + remote_version,
+                                items=["Обновить", "Закрыть"],
+                                action=lambda i: self.install_update() if i == 0 else None,
+                            )
+                        elif self._version_tuple(remote_version) == self._version_tuple(__version__):
+                            self.dialog("Обновления", "Установлена актуальная версия: " + __version__)
+                        else:
+                            self.dialog(
+                                "Обновления",
+                                "На GitHub версия " + remote_version +
+                                ", а установлена " + __version__ + ". Обновление не требуется."
+                            )
+                    run_on_ui_thread(show)
+                except Exception as e:
+                    self.error(e)
+                    self.info("Ошибка проверки: " + str(e))
+            threading.Thread(target=work, daemon=True).start()
 
     def install_update(self, view=None):
-        self.info("Скачиваю обновление…")
-        def work():
-            try:
-                source, remote_version, url = self._download_update_source()
-                if self._version_tuple(remote_version) < self._version_tuple(__version__):
-                    raise ValueError("На GitHub находится более старая версия " + remote_version)
+            self.info("Скачиваю обновление…")
+            def work():
+                try:
+                    source, remote_version, url = self._download_update_source()
+                    if self._version_tuple(remote_version) < self._version_tuple(__version__):
+                        raise ValueError("На GitHub находится более старая версия " + remote_version)
 
-                current_path = globals().get("__file__")
-                if not current_path:
-                    raise ValueError("ExteraGram не сообщил путь текущего плагина")
-                current_path = os.path.abspath(str(current_path))
-                if not os.path.isfile(current_path):
-                    raise ValueError("Не найден текущий файл плагина")
+                    current_path = globals().get("__file__")
+                    if not current_path:
+                        raise ValueError("ExteraGram не сообщил путь текущего плагина")
+                    current_path = os.path.abspath(str(current_path))
+                    if not os.path.isfile(current_path):
+                        raise ValueError("Не найден текущий файл плагина")
 
-                temp_path = current_path + ".update"
-                backup_path = current_path + ".bak"
+                    temp_path = current_path + ".update"
+                    backup_path = current_path + ".bak"
 
-                with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(source)
-                    f.flush()
+                    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+                        f.write(source)
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except Exception:
+                            pass
+
+                    # Backup current working plugin before replacement.
                     try:
-                        os.fsync(f.fileno())
+                        if os.path.exists(backup_path):
+                            os.remove(backup_path)
+                        with open(current_path, "rb") as src_f, open(backup_path, "wb") as bak_f:
+                            bak_f.write(src_f.read())
                     except Exception:
                         pass
 
-                # Backup current working plugin before replacement.
-                try:
-                    if os.path.exists(backup_path):
-                        os.remove(backup_path)
-                    with open(current_path, "rb") as src_f, open(backup_path, "wb") as bak_f:
-                        bak_f.write(src_f.read())
-                except Exception:
-                    pass
+                    os.replace(temp_path, current_path)
+                    self.info("Обновлено до " + remote_version + ". Перезапусти ExteraGram.")
+                except Exception as e:
+                    self.error(e)
+                    self.info("Ошибка обновления: " + str(e))
+            threading.Thread(target=work, daemon=True).start()
 
-                os.replace(temp_path, current_path)
-                self.info("Обновлено до " + remote_version + ". Перезапусти ExteraGram.")
-            except Exception as e:
-                self.error(e)
-                self.info("Ошибка обновления: " + str(e))
-        threading.Thread(target=work, daemon=True).start()
+    def open_username_chat(self, a, username):
+            username = str(username or "").strip().lstrip("@")
+            def opened(uid):
+                try:
+                    Chat = jclass("org.telegram.ui.ChatActivity")
+                    f = get_last_fragment()
+                    if f is None:
+                        return
+                    chat = Chat.of(uid)
+                    f.presentFragment(chat)
+                except Exception as e:
+                    self.error(e)
+                    self.info("Не удалось открыть чат @" + username)
+            self.resolve(a, username, opened)
 
     def create_settings(self):
         a = self.account()
         return [
             Header(text="Fake NFT"),
-            Text(text="Fake NFT", icon="msg_gift", on_click=lambda v: self.collection(a)),
+            Switch(
+                key="simulate",
+                text="Fake NFT",
+                default=False,
+                on_change=self.mode_changed,
+                subtext="Локально перехватывает покупку и передачу фейковых подарков",
+            ),
             Text(text="Выдать по ссылке", on_click=lambda v: self.url_dialog(a)),
 
             Header(text="Fake Profile"),
             Text(text="Number", on_click=lambda v: self.fake_number_dialog(a)),
             Text(text="Username", on_click=lambda v: self.fake_username_menu(a)),
 
-            Header(text="Обновления"),
+            Header(text="Обновления · @agushka"),
             Text(
                 text="Проверить обновление",
                 subtext="Текущая версия: " + __version__,
@@ -471,571 +440,310 @@ class LocalGifts(BasePlugin):
             ),
             Text(
                 text="Обновить",
-                subtext="Скачать последнюю версию с GitHub",
+                subtext="GitHub: spaceterna/Plugins",
                 on_click=self.install_update,
             ),
-
-            Header(text="Разработчики"),
-            Text(text="@agushka"),
-            Text(text="@shmegh1"),
+            Text(
+                text="@agushka",
+                subtext="Разработчик · открыть чат",
+                on_click=lambda v: self.open_username_chat(a, "agushka"),
+            ),
         ]
 
-    def add_menu(self, a):
-        self.dialog("Добавить", items=["Последний открытый", "По NFT-ссылке", "Каталог Telegram"],
-                    action=lambda i: [self.add_last, self.url_dialog, lambda: self.catalog(a)][i]())
-
-    def catalog(self, a, query="", page=0):
-        req = TL_stars.getStarGifts()
-        req.hash = 0
-        def result(res, err):
-            if not self.alive:
-                return
-            gifts = field(res, "gifts")
-            if err or gifts is None:
-                self.info("Каталог недоступен")
-                return
-            rows = [{"data": encode(gifts.get(i)), "label": self.label(gifts.get(i)), "market": True}
-                    for i in range(gifts.size()) if self.search_match(encode(gifts.get(i)), query)]
-            def select(row):
-                g = decode(row["data"])
-                self.dialog(self.label(g), items=["Маркет коллекции", "Выдать обычный подарок"],
-                    action=lambda i: self.market(a, row["data"]) if i == 0 else
-                        self.dialog("Получатель", items=["Себе", "По @username"],
-                            action=lambda j: self.add(a, decode(row["data"]), self.uid(a), "purchase") if j == 0 else
-                                self.recipient(a, lambda uid: self.add(a, decode(row["data"]), uid, "purchase"))))
-            run_on_ui_thread(lambda: self.gallery(a, "Маркет · коллекции", rows, select, page,
-                search=lambda: self.form("Поиск коллекции", [("Название", query)], lambda v: self.catalog(a, v[0])),
-                paginate=lambda n: self.catalog(a, query, n)))
-        send_request(req, result, account=a)
-        self.info("Загрузка коллекций…")
-
-    def search_match(self, data, query):
-        if not query.strip():
-            return True
-        gift = decode(data)
-        words = [self.label(gift)]
-        for i in range(gift.attributes.size()):
-            words.append(str(field(gift.attributes.get(i), "name", "") or ""))
-        haystack = " ".join(words).casefold()
-        return all(part in haystack for part in query.casefold().split())
-
-    def market(self, a, collection, query="", offset="", model_id=0):
-        base = decode(collection)
-        req = TL_stars.getResaleStarGifts()
-        req.gift_id = int(field(base, "gift_id", 0)) or int(base.id)
-        req.offset = offset
-        req.limit = 12
-        req.sort_by_price = True
-        if model_id:
-            attr = TL_stars.starGiftAttributeIdModel()
-            attr.document_id = model_id
-            req.attributes.add(attr)
-            req.flags |= 8
-        def got(res, err):
-            if not self.alive:
-                return
-            gifts = field(res, "gifts")
-            if err or gifts is None:
-                self.info("Маркет недоступен для этой коллекции")
-                return
-            data = [encode(gifts.get(i)) for i in range(gifts.size())]
-            next_offset = str(field(res, "next_offset", "") or "")
-            attributes = field(res, "attributes")
-            models = [(str(attributes.get(i).name), int(attributes.get(i).document.id))
-                      for i in range(attributes.size()) if "AttributeModel" in str(attributes.get(i).getClass().getSimpleName())] if attributes is not None else []
-            def build():
-                consumed = self.store(a)["consumed"]
-                rows = []
-                for item in data:
-                    gift = decode(item)
-                    if "slug:" + source_slug(gift).lower() in consumed or "id:" + str(int(gift.id)) in consumed:
-                        continue
-                    if not self.search_match(item, query):
-                        continue
-                    rows.append({"data": item, "label": self.label(gift), "market": True})
-                def buy(row):
-                    self.dialog(row["label"], items=["Купить · Fake NFT", "Предпросмотр"],
-                        action=lambda i: self.purchase_market(a, row["data"], lambda: self.market(a, collection, query, offset, model_id)) if i == 0 else
-                            self.preview_native(a, row["data"]))
-                def pick_model():
-                    choices = [("Любая модель", 0)] + models
-                    self.pages("Модель", [x[0] for x in choices], lambda i: self.market(a, collection, "", "", choices[i][1]))
-                extras = [("Модель", pick_model), ("Начало", lambda: self.market(a, collection, query, "", model_id))]
-                if next_offset:
-                    extras.append(("Далее в маркете →", lambda: self.market(a, collection, query, next_offset, model_id)))
-                self.gallery(a, "Маркет · " + str(base.title or "NFT"), rows, buy,
-                    search=lambda: self.form("Поиск по странице", [("Модель / фон / номер", query)],
-                        lambda v: self.market(a, collection, v[0], offset, model_id)), extras=extras)
-            run_on_ui_thread(build)
-        send_request(req, got, account=a)
-        self.info("Загрузка маркета…")
-
-    def purchase_market(self, a, data, refresh):
-        self.add(a, decode(data), self.uid(a), "purchase")
-        # The next visit/refetch excludes this source identity, even after a restart.
-        self.info("Куплено. NFT убран из доступных предложений.")
-
-    def preview_native(self, a, data):
-        g = decode(data)
-        f = get_last_fragment()
-        sheet = Sheet(f.getParentActivity(), a, 0, f.getResourceProvider())
-        sheet.set(g.slug, g, None)
-        sheet.show()
-
-    def dashboard(self, a):
-        db = self.store(a)
-        mine = [r for r in db["gifts"] if row_active(r) and r["owner"] == self.uid(a)]
-        self.action_panel("Fake NFT", str(len(mine)) + " подарков   ·   " +
-            str(sum(r.get("state") == "listed" for r in mine)) + " на продаже\n" +
-            ("Fake-режим включён" if self.mode() else "Fake-режим выключен"),
-            [("Маркет", lambda: self.catalog(a)), ("Коллекция", lambda: self.collection(a)),
-             ("Выдать по ссылке", lambda: self.url_dialog(a)), ("Последний NFT", self.add_last),
-             ("Статистика", lambda: self.statistics(a)), ("История", lambda: self.history(a)),
-             ("Группы", lambda: self.groups(a)), ("Порядок", lambda: self.profile_order(a)),
-             ("Fake вкл/выкл", self.toggle_mode), ("Снимки профилей", lambda: self.snapshots(a))])
-
-    def toggle_mode(self):
-        value = not self.get_setting("simulate", False)
-        self.set_setting("simulate", value, reload_settings=True)
-        self.mode_changed(value)
-
-    def snapshots(self, a):
-        owners = list(self.store(a)["shared_profiles"])
-        if not owners:
-            self.info("Вставь ссылку spaceterna через «Выдать по ссылке»")
-            return
-        def select(i):
-            owner = owners[i]
-            self.dialog("Снимки " + owner, items=["Показать", "Удалить снимки"],
-                action=lambda k: self.gallery(a, "Снимки · " + owner, self.store(a)["shared_profiles"][owner],
-                    lambda row: self.open_card(a, row)) if k == 0 else self.clear_snapshots(a, owner))
-        self.pages("Сохранённые профили", owners, select)
-
-    def clear_snapshots(self, a, owner):
-        self.store(a)["shared_profiles"].pop(owner, None)
-        self.save(a)
-        self.refresh(a)
-        self.info("Снимки удалены")
-
-    def action_panel(self, title, subtitle, actions):
-        from org.telegram.messenger import AndroidUtilities
-        f = get_last_fragment()
-        if not f or not f.getParentActivity():
-            return
-        activity = f.getParentActivity()
-        Theme = jclass("org.telegram.ui.ActionBar.Theme")
-        root = LinearLayout(activity)
-        root.setOrientation(1)
-        root.setPadding(AndroidUtilities.dp(16), 0, AndroidUtilities.dp(16), AndroidUtilities.dp(12))
-        label = TextView(activity)
-        label.setText(subtitle)
-        label.setTextSize(14)
-        label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
-        root.addView(label)
-        b = AlertDialogBuilder(activity)
-        b.set_title(title)
-        for start in range(0, len(actions), 2):
-            line = LinearLayout(activity)
-            line.setOrientation(0)
-            for name, callback in actions[start:start + 2]:
-                button = Button(activity)
-                button.setText(name)
-                button.setTextSize(13)
-                button.setAllCaps(False)
-                button.setMaxLines(2)
-                button.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText))
-                def click(fn=callback):
-                    b.dismiss()
-                    fn()
-                button.setOnClickListener(Click(self, click))
-                line.addView(button, LinearLayout.LayoutParams(0, AndroidUtilities.dp(58), 1.0))
-            root.addView(line)
-        scroll = ScrollView(activity)
-        scroll.addView(root)
-        b.set_view(scroll)
-        b.set_negative_button("Закрыть", lambda d, w: d.dismiss())
-        b.show()
-
-    def gallery(self, a, title, rows, select, page=0, search=None, paginate=None, extras=None):
-        from org.telegram.messenger import AndroidUtilities
-        f = get_last_fragment()
-        if not f or not f.getParentActivity():
-            return
-        activity = f.getParentActivity()
-        Theme = jclass("org.telegram.ui.ActionBar.Theme")
-        root = LinearLayout(activity)
-        root.setOrientation(1)
-        root.setPadding(AndroidUtilities.dp(10), 0, AndroidUtilities.dp(10), AndroidUtilities.dp(10))
-        b = AlertDialogBuilder(activity)
-        b.set_title(title[:50])
-        controls = [("Поиск", search)] if search else []
-        controls += extras or []
-        if paginate and page > 0:
-            controls.append(("← Назад", lambda: paginate(page - 1)))
-        if paginate and (page + 1) * 12 < len(rows):
-            controls.append(("Далее →", lambda: paginate(page + 1)))
-        for name, action in controls:
-            button = Button(activity)
-            button.setText(name)
-            button.setAllCaps(False)
-            button.setTextSize(13)
-            button.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText))
-            button.setOnClickListener(Click(self, lambda fn=action: (b.dismiss(), fn())))
-            root.addView(button)
-        displayed = rows[page * 12:(page + 1) * 12]
-        if not displayed:
-            label = TextView(activity)
-            label.setText("Ничего не найдено")
-            label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
-            label.setPadding(16, 24, 16, 24)
-            root.addView(label)
-        for index in range(0, len(displayed), 2):
-            line = LinearLayout(activity)
-            line.setOrientation(0)
-            for row in displayed[index:index + 2]:
-                box = LinearLayout(activity)
-                box.setOrientation(1)
-                try:
-                    Cell = jclass("org.telegram.ui.Gifts.GiftSheet$GiftCell")
-                    card = Cell(activity, a, f.getResourceProvider())
-                    if row.get("market"):
-                        g = decode(row["data"])
-                        card.setStarsGift(g, False, False, True, True, False)
-                    else:
-                        card.setStarsGift(self.saved(row), True, False)
-                    card.setOnClickListener(Click(self, lambda r=row: (b.dismiss(), select(r))))
-                    box.addView(card, LinearLayout.LayoutParams(-1, AndroidUtilities.dp(190)))
-                except Exception as e:
-                    self.error(e)
-                    fallback = Button(activity)
-                    fallback.setText(row["label"])
-                    fallback.setAllCaps(False)
-                    fallback.setOnClickListener(Click(self, lambda r=row: (b.dismiss(), select(r))))
-                    box.addView(fallback, LinearLayout.LayoutParams(-1, AndroidUtilities.dp(110)))
-                caption = TextView(activity)
-                caption.setText(row["label"][:45] + (" · CUSTOM" if row.get("custom") else "") +
-                    (" · " + str(row.get("price", 0)) + " ★" if row.get("state") == "listed" else ""))
-                caption.setTextSize(12)
-                caption.setMaxLines(2)
-                caption.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
-                caption.setPadding(8, 0, 8, 8)
-                box.addView(caption)
-                box.setOnClickListener(Click(self, lambda r=row: (b.dismiss(), select(r))))
-                line.addView(box, LinearLayout.LayoutParams(0, -2, 1.0))
-            if len(displayed[index:index + 2]) == 1:
-                spacer = TextView(activity)
-                line.addView(spacer, LinearLayout.LayoutParams(0, 1, 1.0))
-            root.addView(line)
-        scroll = ScrollView(activity)
-        scroll.addView(root)
-        b.set_view(scroll)
-        b.set_negative_button("Закрыть", lambda d, w: d.dismiss())
-        b.show()
 
     def pages(self, title, labels, action, page=0):
-        size = 15
-        start = page * size
-        batch = labels[start:start + size]
-        if not batch:
-            self.info("Список пуст")
-            return
-        items = [x if len(x) <= 48 else x[:45] + "…" for x in batch]
-        back = len(items) if page > 0 else -1
-        if back >= 0:
-            items.append("← Назад")
-        forward = len(items) if start + size < len(labels) else -1
-        if forward >= 0:
-            items.append("Далее →")
-        def choose(i):
-            if i == back:
-                self.pages(title, labels, action, page - 1)
-            elif i == forward:
-                self.pages(title, labels, action, page + 1)
-            else:
-                action(start + i)
-        self.dialog(title, items=items, action=choose)
+            size = 15
+            start = page * size
+            batch = labels[start:start + size]
+            if not batch:
+                self.info("Список пуст")
+                return
+            items = [x if len(x) <= 48 else x[:45] + "…" for x in batch]
+            back = len(items) if page > 0 else -1
+            if back >= 0:
+                items.append("← Назад")
+            forward = len(items) if start + size < len(labels) else -1
+            if forward >= 0:
+                items.append("Далее →")
+            def choose(i):
+                if i == back:
+                    self.pages(title, labels, action, page - 1)
+                elif i == forward:
+                    self.pages(title, labels, action, page + 1)
+                else:
+                    action(start + i)
+            self.dialog(title, items=items, action=choose)
 
     def recipient(self, a, callback):
-        self.form("Получатель", [("@username или ID", "")], lambda v: self.resolve(a, v[0], callback))
+            self.form("Получатель", [("@username или ID", "")], lambda v: self.resolve(a, v[0], callback))
 
     def resolve(self, a, value, callback):
-        value = value.strip()
-        if value.isdigit():
-            uid = int(value)
-            if not 0 < uid < 2**63:
-                raise ValueError("Неверный ID")
-            self.dialog("Получатель " + str(uid), items=["Подтвердить", "Отмена"],
-                        action=lambda i: callback(uid) if i == 0 else None)
-            return
-        username = re.sub(r"^(?:https?://)?t\.me/", "", value).strip("/@")
-        if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", username):
-            raise ValueError("Введи @username или числовой ID")
-        req = TLRPC.TL_contacts_resolveUsername()
-        req.username = username
-        def received(res, err):
-            if not self.alive:
+            value = value.strip()
+            if value.isdigit():
+                uid = int(value)
+                if not 0 < uid < 2**63:
+                    raise ValueError("Неверный ID")
+                self.dialog("Получатель " + str(uid), items=["Подтвердить", "Отмена"],
+                            action=lambda i: callback(uid) if i == 0 else None)
                 return
-            uid = int(field(field(res, "peer"), "user_id", 0))
-            if err or uid <= 0:
-                self.info("Пользователь не найден")
-                return
-            mc = jclass("org.telegram.messenger.MessagesController").getInstance(a)
-            mc.putUsers(res.users, False)
-            user = mc.getUser(uid)
-            name = " ".join(str(field(user, x, "") or "") for x in ("first_name", "last_name")).strip()
-            run_on_ui_thread(lambda: self.dialog(name or username,
-                items=["Передать / выдать @" + username, "Отмена"],
-                action=lambda i: callback(uid) if i == 0 else None))
-        send_request(req, received, account=a)
-        self.info("Ищу @" + username)
+            username = re.sub(r"^(?:https?://)?t\.me/", "", value).strip("/@")
+            if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", username):
+                raise ValueError("Введи @username или числовой ID")
+            req = TLRPC.TL_contacts_resolveUsername()
+            req.username = username
+            def received(res, err):
+                if not self.alive:
+                    return
+                uid = int(field(field(res, "peer"), "user_id", 0))
+                if err or uid <= 0:
+                    self.info("Пользователь не найден")
+                    return
+                mc = jclass("org.telegram.messenger.MessagesController").getInstance(a)
+                mc.putUsers(res.users, False)
+                user = mc.getUser(uid)
+                name = " ".join(str(field(user, x, "") or "") for x in ("first_name", "last_name")).strip()
+                run_on_ui_thread(lambda: self.dialog(name or username,
+                    items=["Передать / выдать @" + username, "Отмена"],
+                    action=lambda i: callback(uid) if i == 0 else None))
+            send_request(req, received, account=a)
+            self.info("Ищу @" + username)
 
     def dialog(self, title, message="", items=None, action=None):
-        f = get_last_fragment()
-        if not f or not f.getParentActivity():
-            return
-        b = AlertDialogBuilder(f.getParentActivity())
-        b.set_title(title[:64])
-        if items is None:
-            b.set_message(message)
-            b.set_positive_button("ОК", lambda d, w: d.dismiss())
-        else:
-            def click(d, i):
-                d.dismiss()
+            f = get_last_fragment()
+            if not f or not f.getParentActivity():
+                return
+            b = AlertDialogBuilder(f.getParentActivity())
+            b.set_title(title[:64])
+            if items is None:
+                b.set_message(message)
+                b.set_positive_button("ОК", lambda d, w: d.dismiss())
+            else:
+                def click(d, i):
+                    d.dismiss()
+                    try:
+                        action(int(i))
+                    except Exception as e:
+                        self.error(e)
+                        self.info(str(e))
+                b.set_items(items, click)
+                b.set_negative_button("Закрыть", lambda d, w: d.dismiss())
+            b.show()
+
+    def form(self, title, fields, callback):
+            f = get_last_fragment()
+            if not f or not f.getParentActivity():
+                return
+            activity = f.getParentActivity()
+            layout = LinearLayout(activity)
+            layout.setOrientation(1)
+            from org.telegram.messenger import AndroidUtilities
+            Theme = jclass("org.telegram.ui.ActionBar.Theme")
+            layout.setPadding(AndroidUtilities.dp(20), AndroidUtilities.dp(8), AndroidUtilities.dp(20), AndroidUtilities.dp(8))
+            inputs = []
+            for hint, value in fields:
+                caption = TextView(activity)
+                caption.setText(hint)
+                caption.setTextSize(13)
+                caption.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
+                layout.addView(caption)
+                view = EditText(activity)
+                view.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+                view.setTextSize(16)
+                view.setHint(hint)
+                view.setSingleLine(True)
+                if hint == "Ключ доступа":
+                    view.setInputType(129)
+                view.setText(str(value))
+                layout.addView(view)
+                inputs.append(view)
+            scroll = ScrollView(activity)
+            scroll.addView(layout)
+            b = AlertDialogBuilder(activity)
+            b.set_title(title[:64])
+            b.set_view(scroll)
+            def submit(d, w):
                 try:
-                    action(int(i))
+                    callback([str(v.getText()).strip() for v in inputs])
+                    d.dismiss()
                 except Exception as e:
                     self.error(e)
                     self.info(str(e))
-            b.set_items(items, click)
-            b.set_negative_button("Закрыть", lambda d, w: d.dismiss())
-        b.show()
-
-    def form(self, title, fields, callback):
-        f = get_last_fragment()
-        if not f or not f.getParentActivity():
-            return
-        activity = f.getParentActivity()
-        layout = LinearLayout(activity)
-        layout.setOrientation(1)
-        from org.telegram.messenger import AndroidUtilities
-        Theme = jclass("org.telegram.ui.ActionBar.Theme")
-        layout.setPadding(AndroidUtilities.dp(20), AndroidUtilities.dp(8), AndroidUtilities.dp(20), AndroidUtilities.dp(8))
-        inputs = []
-        for hint, value in fields:
-            caption = TextView(activity)
-            caption.setText(hint)
-            caption.setTextSize(13)
-            caption.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText))
-            layout.addView(caption)
-            view = EditText(activity)
-            view.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
-            view.setTextSize(16)
-            view.setHint(hint)
-            view.setSingleLine(True)
-            if hint == "Ключ доступа":
-                view.setInputType(129)
-            view.setText(str(value))
-            layout.addView(view)
-            inputs.append(view)
-        scroll = ScrollView(activity)
-        scroll.addView(layout)
-        b = AlertDialogBuilder(activity)
-        b.set_title(title[:64])
-        b.set_view(scroll)
-        def submit(d, w):
-            try:
-                callback([str(v.getText()).strip() for v in inputs])
-                d.dismiss()
-            except Exception as e:
-                self.error(e)
-                self.info(str(e))
-        b.set_positive_button("Готово", submit)
-        b.set_negative_button("Отмена", lambda d, w: d.dismiss())
-        b.show()
-
-    def capture(self, p):
-        sheet = p.thisObject
-        gift = sheet.getGift()
-        if gift is not None:
-            a = int(field(sheet, "currentAccount", self.account()))
-            self.last = (a, encode(gift), int(field(sheet, "dialogId", self.uid(a))))
-
-    def add_last(self):
-        if not self.last:
-            self.info("Сначала открой карточку нужного подарка.")
-            return
-        a, data, owner = self.last
-        if a != self.account():
-            self.info("Открой подарок в текущем аккаунте.")
-            return
-        self.add(a, decode(data), self.uid(a), "purchase")
+            b.set_positive_button("Готово", submit)
+            b.set_negative_button("Отмена", lambda d, w: d.dismiss())
+            b.show()
 
     def url_dialog(self, a=None):
-        a = self.account() if a is None else a
-        self.form("Выдать / открыть NFT", [("Ссылка t.me/nft/…", "")], lambda v: self.load_link(a, v[0]))
+            a = self.account() if a is None else a
+            self.form("Выдать / открыть NFT", [("Ссылка t.me/nft/…", "")], lambda v: self.load_link(a, v[0]))
 
     def load_link(self, a, value):
-        slug, owner, public = parsed_nft_link(value)
+        slug = parsed_nft_link(value)
         req = TL_stars.getUniqueStarGift()
         req.slug = slug
+
         def got(res, error):
             if not self.alive:
                 return
-            if error or res is None or field(res, "gift") is None:
+            gift = field(res, "gift") if res is not None else None
+            if error or gift is None:
                 self.info("Карточка недоступна в Telegram")
                 return
-            data = encode(res.gift)
+            data = encode(gift)
+
             def show():
-                if owner:
-                    self.preview_shared(a, decode(data), slug, owner, public)
-                else:
-                    self.dialog(self.label(decode(data)), items=["Выдать себе", "Выдать получателю", "Отмена"],
-                        action=lambda i: self.add(a, decode(data), self.uid(a), "purchase") if i == 0 else
-                            self.recipient(a, lambda uid: self.add(a, decode(data), uid, "purchase")) if i == 1 else None)
+                self.dialog(
+                    self.label(decode(data)),
+                    items=["Выдать себе", "Выдать получателю", "Отмена"],
+                    action=lambda i:
+                        self.add(a, decode(data), self.uid(a), "purchase") if i == 0 else
+                        self.recipient(a, lambda uid: self.add(a, decode(data), uid, "purchase")) if i == 1 else None,
+                )
             run_on_ui_thread(show)
+
         send_request(req, got, account=a)
         self.info("Загрузка карточки…")
 
+
     def label(self, gift):
-        title = str(field(gift, "title", "") or "Подарок")
-        num = int(field(gift, "num", 0))
-        if num:
-            return title + " #" + str(num)
-        return title + " · " + str(int(gift.id))[-6:]
+            title = str(field(gift, "title", "") or "Подарок")
+            num = int(field(gift, "num", 0))
+            if num:
+                return title + " #" + str(num)
+            return title + " · " + str(int(gift.id))[-6:]
 
     def add(self, a, gift, owner, kind, replace=0):
-        if gift is None:
-            raise ValueError("Карточка ещё не загрузилась")
-        owner = owner or self.uid(a)
-        with self.lock:
-            db = self.store(a)
-            unique = isinstance(gift, TL_stars.TL_starGiftUnique)
-            if local_id(gift.id):
-                raise ValueError("Это уже локальный подарок; копия не создаётся")
-            original_slug = source_slug(gift) if unique else ""
-            original_id = int(gift.id)
-            key_source = "slug:" + original_slug.lower() if original_slug else ("id:" + str(original_id) if unique and original_id > 0 else "")
-            # Purchased identities remain consumed after transfer/sale/deletion.
-            if unique and kind in ("purchase", "copy", "edit") and (key_source in db["consumed"] or "id:" + str(original_id) in db["consumed"]):
-                raise ValueError("Этот NFT уже покупали. Дубликат не создаётся.")
-            g = decode(encode(gift))
-            price = 0
-            amounts = field(g, "resell_amount")
-            if amounts is not None and amounts.size():
-                item = amounts.get(0)
-                if "Ton" not in str(item.getClass().getSimpleName()):
-                    price = max(0, int(item.amount))
-            if not unique:
-                price = max(0, int(field(g, "stars", 0)))
-            n = self.next_id(db)
-            g.id = n
-            if unique:
-                g.owner_id = peer(owner)
-                g.flags = (int(g.flags) | 1) & ~6
-                g.owner_name = None
-                g.owner_address = None
-                g.resell_amount = None
-                g.slug = "LocalGift-" + str(-n)
-            row = {"id": n, "owner": owner, "data": encode(g), "date": int(time.time()),
-                   "group": "", "hidden": False, "replace": int(replace), "source": original_id,
-                   "label": self.label(g), "public_id": "FN-" + uuid.uuid4().hex[:16].upper(),
-                   "source_slug": original_slug, "source_key": key_source, "custom": unique and not bool(original_slug),
-                   "preview_only": False, "state": "owned" if owner == self.uid(a) else "transferred",
-                   "price": 0, "purchase_price": price}
-            db["gifts"].append(row)
-            if key_source:
-                db["consumed"][key_source] = row["public_id"]
-                if original_id > 0:
-                    db["consumed"]["id:" + str(original_id)] = row["public_id"]
-            self.event(db, row, owner, kind, amount=price)
-            self.save(a)
-        self.refresh(a)
-        self.info("Выдан: " + row["label"])
-        if kind == "purchase":
-            self.finish_purchase(a, row, db["events"][-1])
-        return row
+            if gift is None:
+                raise ValueError("Карточка ещё не загрузилась")
+            owner = owner or self.uid(a)
+            with self.lock:
+                db = self.store(a)
+                unique = isinstance(gift, TL_stars.TL_starGiftUnique)
+                if local_id(gift.id):
+                    raise ValueError("Это уже локальный подарок; копия не создаётся")
+                original_slug = source_slug(gift) if unique else ""
+                original_id = int(gift.id)
+                key_source = "slug:" + original_slug.lower() if original_slug else ("id:" + str(original_id) if unique and original_id > 0 else "")
+                # Purchased identities remain consumed after transfer/sale/deletion.
+                if unique and kind in ("purchase", "copy", "edit") and (key_source in db["consumed"] or "id:" + str(original_id) in db["consumed"]):
+                    raise ValueError("Этот NFT уже покупали. Дубликат не создаётся.")
+                g = decode(encode(gift))
+                price = 0
+                amounts = field(g, "resell_amount")
+                if amounts is not None and amounts.size():
+                    item = amounts.get(0)
+                    if "Ton" not in str(item.getClass().getSimpleName()):
+                        price = max(0, int(item.amount))
+                if not unique:
+                    price = max(0, int(field(g, "stars", 0)))
+                n = self.next_id(db)
+                g.id = n
+                if unique:
+                    g.owner_id = peer(owner)
+                    g.flags = (int(g.flags) | 1) & ~6
+                    g.owner_name = None
+                    g.owner_address = None
+                    g.resell_amount = None
+                    g.slug = "LocalGift-" + str(-n)
+                row = {"id": n, "owner": owner, "data": encode(g), "date": int(time.time()),
+                       "group": "", "hidden": False, "replace": int(replace), "source": original_id,
+                       "label": self.label(g), "public_id": "FN-" + uuid.uuid4().hex[:16].upper(),
+                       "source_slug": original_slug, "source_key": key_source, "custom": unique and not bool(original_slug),
+                       "preview_only": False, "state": "owned" if owner == self.uid(a) else "transferred",
+                       "price": 0, "purchase_price": price}
+                db["gifts"].append(row)
+                if key_source:
+                    db["consumed"][key_source] = row["public_id"]
+                    if original_id > 0:
+                        db["consumed"]["id:" + str(original_id)] = row["public_id"]
+                self.event(db, row, owner, kind, amount=price)
+                self.save(a)
+            self.refresh(a)
+            self.info("Выдан: " + row["label"])
+            if kind == "purchase":
+                self.finish_purchase(a, row, db["events"][-1])
+            return row
 
     def event(self, db, row, dialog, kind, amount=0):
-        db["events"].append({"id": self.next_id(db), "gift": row["data"], "dialog": dialog,
-                             "date": int(time.time()), "kind": kind, "label": row["label"],
-                             "public_id": row["public_id"], "amount": int(amount)})
+            db["events"].append({"id": self.next_id(db), "gift": row["data"], "dialog": dialog,
+                                 "date": int(time.time()), "kind": kind, "label": row["label"],
+                                 "public_id": row["public_id"], "amount": int(amount)})
 
     def saved(self, row):
-        g = TL_stars.TL_savedStarGift()
-        g.flags = 8
-        g.msg_id = int(row["id"])
-        g.saved_id = int(row["id"])
-        g.date = int(row["date"])
-        g.gift = decode(row["data"])
-        if row.get("state") == "listed" and isinstance(g.gift, TL_stars.TL_starGiftUnique):
-            price = TL_stars.TL_starsAmount()
-            price.amount = int(row.get("price", 0))
-            g.gift.resell_amount = jclass("java.util.ArrayList")()
-            g.gift.resell_amount.add(price)
-        g.unsaved = bool(row["hidden"])
-        g.can_upgrade = False
-        g.pinned_to_top = bool(row.get("pinned", False))
-        return g
+            g = TL_stars.TL_savedStarGift()
+            g.flags = 8
+            g.msg_id = int(row["id"])
+            g.saved_id = int(row["id"])
+            g.date = int(row["date"])
+            g.gift = decode(row["data"])
+            if row.get("state") == "listed" and isinstance(g.gift, TL_stars.TL_starGiftUnique):
+                price = TL_stars.TL_starsAmount()
+                price.amount = int(row.get("price", 0))
+                g.gift.resell_amount = jclass("java.util.ArrayList")()
+                g.gift.resell_amount.add(price)
+            g.unsaved = bool(row["hidden"])
+            g.can_upgrade = False
+            g.pinned_to_top = bool(row.get("pinned", False))
+            return g
 
     def matches(self, li, row):
-        if bool(field(li, "isCollection", False)):
-            return False
-        if int(field(li, "craftingGiftId", 0)):
-            return False
-        unique = isinstance(decode(row["data"]), TL_stars.TL_starGiftUnique)
-        try:
-            if row["hidden"] and not li.isInclude_hidden():
+            if bool(field(li, "isCollection", False)):
                 return False
-            if not row["hidden"] and not li.isInclude_displayed():
+            if int(field(li, "craftingGiftId", 0)):
                 return False
-            if unique and not li.isInclude_unique():
-                return False
-        except Exception:
-            pass
-        return True
+            unique = isinstance(decode(row["data"]), TL_stars.TL_starGiftUnique)
+            try:
+                if row["hidden"] and not li.isInclude_hidden():
+                    return False
+                if not row["hidden"] and not li.isInclude_displayed():
+                    return False
+                if unique and not li.isInclude_unique():
+                    return False
+            except Exception:
+                pass
+            return True
 
     def strip(self, li):
-        for i in range(li.gifts.size() - 1, -1, -1):
-            if local_id(li.gifts.get(i).gift.id):
-                li.gifts.remove(i)
+            for i in range(li.gifts.size() - 1, -1, -1):
+                if local_id(li.gifts.get(i).gift.id):
+                    li.gifts.remove(i)
 
     def inject(self, li):
-        if li is None or not self.alive:
-            return
-        a = int(li.currentAccount)
-        owner = int(li.dialogId) or self.uid(a)
-        db = self.store(a)
-        rows = [r for r in self.visible_records(a) if r["owner"] == owner and self.matches(li, r)]
-        self.strip(li)
-        hidden_ids = {r["replace"] for r in rows if r["replace"]}
-        native = [li.gifts.get(i) for i in range(li.gifts.size())
-                  if int(li.gifts.get(i).gift.id) not in hidden_ids]
-        pinned = [g for g in native if bool(g.pinned_to_top)]
-        rest = [g for g in native if not bool(g.pinned_to_top)]
-        combined = pinned + [self.saved(r) for r in reversed(rows)] + rest
-        order = db.get("profile_order", {}).get(str(owner), [])
-        ranks = {int(gid): i for i, gid in enumerate(order)}
-        # Reordering is local. A gift never jumps ahead of the pinned tier.
-        combined.sort(key=lambda g: (0 if bool(g.pinned_to_top) else 1,
-                                     ranks.get(int(g.gift.id), len(ranks))))
-        li.gifts.clear()
-        for gift in combined:
-            li.gifts.add(gift)
+            if li is None or not self.alive:
+                return
+            a = int(li.currentAccount)
+            owner = int(li.dialogId) or self.uid(a)
+            db = self.store(a)
+            rows = [r for r in self.visible_records(a) if r["owner"] == owner and self.matches(li, r)]
+            self.strip(li)
+            hidden_ids = {r["replace"] for r in rows if r["replace"]}
+            native = [li.gifts.get(i) for i in range(li.gifts.size())
+                      if int(li.gifts.get(i).gift.id) not in hidden_ids]
+            pinned = [g for g in native if bool(g.pinned_to_top)]
+            rest = [g for g in native if not bool(g.pinned_to_top)]
+            combined = pinned + [self.saved(r) for r in reversed(rows)] + rest
+            order = db.get("profile_order", {}).get(str(owner), [])
+            ranks = {int(gid): i for i, gid in enumerate(order)}
+            # Reordering is local. A gift never jumps ahead of the pinned tier.
+            combined.sort(key=lambda g: (0 if bool(g.pinned_to_top) else 1,
+                                         ranks.get(int(g.gift.id), len(ranks))))
+            li.gifts.clear()
+            for gift in combined:
+                li.gifts.add(gift)
 
     def got_list(self, p):
-        li = p.getResult()
-        if li is None:
-            return
-        if not any(x == li for x in self.lists):
-            self.lists.append(li)
-        self.inject(li)
+            li = p.getResult()
+            if li is None:
+                return
+            if not any(x == li for x in self.lists):
+                self.lists.append(li)
+            self.inject(li)
 
     def fake_profile_key(self, a):
-        return "fake_profile_v1_" + str(self.uid(a))
+        return "fake_profile_v2_" + str(self.uid(a))
 
     def fake_profile(self, a):
         raw = self.get_setting(self.fake_profile_key(a), "")
-        data = {"number": "", "main": "", "extra": [], "prices": {}}
+        data = {"number": "", "main": "", "extra": [], "prices": {}, "last": {}}
         if raw:
             try:
                 saved = json.loads(raw)
@@ -1043,10 +751,9 @@ class LocalGifts(BasePlugin):
                     data.update(saved)
             except Exception:
                 pass
-        if not isinstance(data.get("extra"), list):
-            data["extra"] = []
-        if not isinstance(data.get("prices"), dict):
-            data["prices"] = {}
+        for key, default in (("extra", []), ("prices", {}), ("last", {})):
+            if not isinstance(data.get(key), type(default)):
+                data[key] = default
         return data
 
     def save_fake_profile(self, a, data):
@@ -1081,18 +788,18 @@ class LocalGifts(BasePlugin):
         data = self.fake_profile(a)
         main = data.get("main") or "оригинальный"
         extra = data.get("extra") or []
-        prices = data.get("prices") or {}
         subtitle = ("Основной: @" + main if main != "оригинальный" else "Основной: оригинальный")
         subtitle += "\nДополнительные: " + (", ".join("@" + x for x in extra) if extra else "нет")
-        if prices:
-            subtitle += "\nЦены: " + ", ".join("@" + k + "=" + str(v) for k, v in prices.items())
-        self.dialog("Fake Profile · Username", subtitle,
-                    items=["Основной username", "Дополнительные username", "Цены username", "Сбросить Fake Profile"],
-                    action=lambda i:
-                        self.fake_main_username_dialog(a) if i == 0 else
-                        self.fake_extra_usernames_dialog(a) if i == 1 else
-                        self.fake_username_price_dialog(a) if i == 2 else
-                        self.reset_fake_profile(a))
+        self.dialog(
+            "Fake Profile · Username",
+            subtitle,
+            items=["Основной username", "Дополнительные username", "Цена / последняя покупка", "Сбросить Fake Profile"],
+            action=lambda i:
+                self.fake_main_username_dialog(a) if i == 0 else
+                self.fake_extra_usernames_dialog(a) if i == 1 else
+                self.fake_username_meta_dialog(a) if i == 2 else
+                self.reset_fake_profile(a),
+        )
 
     def fake_main_username_dialog(self, a):
         data = self.fake_profile(a)
@@ -1106,9 +813,8 @@ class LocalGifts(BasePlugin):
         data = self.fake_profile(a)
         current = ", ".join(data.get("extra", []))
         def save(v):
-            raw = re.split(r"[\s,;]+", str(v[0] or "").strip())
             result = []
-            for item in raw:
+            for item in re.split(r"[\s,;]+", str(v[0] or "").strip()):
                 if not item:
                     continue
                 username = self.normalize_fake_username(item, False)
@@ -1119,46 +825,62 @@ class LocalGifts(BasePlugin):
         self.form("Дополнительные username",
                   [("Через запятую; пусто = убрать все", current)], save)
 
-    def fake_username_price_dialog(self, a):
+    def fake_username_meta_dialog(self, a):
         data = self.fake_profile(a)
         names = []
-        main = data.get("main", "")
-        if main:
-            names.append(main)
+        if data.get("main"):
+            names.append(data["main"])
         names += [x for x in data.get("extra", []) if x not in names]
         if not names:
-            self.info("Сначала задай основной или дополнительный username")
+            self.info("Сначала задай username")
             return
 
         def choose(i):
             username = names[i]
-            current = data.get("prices", {}).get(username, "")
+            price = str(data.get("prices", {}).get(username, ""))
+            last = str(data.get("last", {}).get(username, ""))
+
             def save(v):
-                value = str(v[0] or "").strip()
-                prices = data.setdefault("prices", {})
-                if not value or value.casefold() in ("ориг", "original", "orig"):
-                    prices.pop(username, None)
+                price_value = str(v[0] or "").strip()
+                last_value = str(v[1] or "").strip()
+
+                if price_value:
+                    if not re.fullmatch(r"[0-9]{1,18}(?:[.,][0-9]{1,6})?", price_value):
+                        raise ValueError("Цена: только число")
+                    data.setdefault("prices", {})[username] = price_value.replace(",", ".")
                 else:
-                    if not re.fullmatch(r"[0-9]{1,18}", value):
-                        raise ValueError("Цена должна быть числом; пусто = оригинальная")
-                    prices[username] = int(value)
+                    data.setdefault("prices", {}).pop(username, None)
+
+                if last_value:
+                    data.setdefault("last", {})[username] = last_value[:80]
+                else:
+                    data.setdefault("last", {}).pop(username, None)
+
                 self.save_fake_profile(a, data)
-            self.form("Цена @" + username,
-                      [("Пусто = оригинальная; иначе своя цена", current)], save)
-        self.pages("Цена username", ["@" + x for x in names], choose)
+
+            self.form(
+                "@" + username,
+                [
+                    ("Цена; пусто = оставить оригинальную", price),
+                    ("Последняя покупка; например 31.10.2026", last),
+                ],
+                save,
+            )
+
+        self.pages("Username", ["@" + x for x in names], choose)
 
     def reset_fake_profile(self, a):
         self.set_setting(self.fake_profile_key(a), "")
-        self.info("Fake Profile сброшен. Перезапусти экран профиля.")
+        self.apply_fake_profile_now(a)
+        self.info("Fake Profile сброшен")
 
     def apply_fake_profile_to_user(self, a, user):
         if user is None:
             return user
         try:
-            user_id = int(field(user, "id", 0))
+            if int(field(user, "id", 0)) != self.uid(a):
+                return user
         except Exception:
-            return user
-        if user_id != self.uid(a):
             return user
 
         data = self.fake_profile(a)
@@ -1166,20 +888,20 @@ class LocalGifts(BasePlugin):
         main = str(data.get("main", "") or "")
         extra = list(data.get("extra", []) or [])
 
-        try:
-            if number:
+        if number:
+            try:
                 user.phone = number.lstrip("+")
-        except Exception:
-            pass
+                user.flags = int(field(user, "flags", 0)) | 16
+            except Exception:
+                pass
 
-        try:
-            if main:
+        if main:
+            try:
                 user.username = main
-        except Exception:
-            pass
+                user.flags = int(field(user, "flags", 0)) | 8
+            except Exception:
+                pass
 
-        # Telegram stores extra public usernames in User.usernames.
-        # Build the vector only when the running client exposes TL_username.
         if main or extra:
             try:
                 ArrayList = jclass("java.util.ArrayList")
@@ -1197,6 +919,7 @@ class LocalGifts(BasePlugin):
                 user.usernames = usernames
             except Exception as e:
                 self.error(e)
+
         return user
 
     def fake_profile_user(self, p):
@@ -1212,903 +935,436 @@ class LocalGifts(BasePlugin):
             mc = jclass("org.telegram.messenger.MessagesController").getInstance(a)
             user = mc.getUser(self.uid(a))
             self.apply_fake_profile_to_user(a, user)
+            f = get_last_fragment()
+            if f is not None and "ProfileActivity" in str(f.getClass().getSimpleName()):
+                updater = getattr(f, "updateProfileData", None)
+                if callable(updater):
+                    updater()
         except Exception as e:
             self.error(e)
 
-    def user_full(self, p):
-        full = p.getResult()
-        if full is None or not self.alive or not p.args:
+    def _profile_view_walk(self, view):
+        if view is None:
             return
-        a = int(field(p.thisObject, "currentAccount", self.account()))
-        owner = int(p.args[0])
-        extra = sum(1 for r in self.visible_records(a) if r["owner"] == owner and not r["hidden"] and not r["replace"])
-        if not extra:
-            return
-        out = SerializedData()
-        inp = None
+        yield view
         try:
-            full.serializeToStream(out)
-            inp = SerializedData(out.toByteArray())
-            copy = TLRPC.UserFull.TLdeserialize(inp, inp.readInt32(True), True)
-            copy.stargifts_count = int(full.stargifts_count) + extra
-            p.setResult(copy)
-        finally:
-            out.cleanup()
-            if inp is not None:
-                inp.cleanup()
+            count = int(view.getChildCount())
+        except Exception:
+            return
+        for i in range(count):
+            child = view.getChildAt(i)
+            for item in self._profile_view_walk(child):
+                yield item
+
+    def fake_profile_fragment(self, p):
+        fragment = p.thisObject
+        a = int(field(fragment, "currentAccount", self.account()))
+        my_uid = self.uid(a)
+
+        dialog_id = int(field(fragment, "dialog_id", field(fragment, "userId", 0)) or 0)
+        if dialog_id not in (0, my_uid):
+            return
+
+        data = self.fake_profile(a)
+        names = []
+        if data.get("main"):
+            names.append(data["main"])
+        names += [x for x in data.get("extra", []) if x not in names]
+        prices = data.get("prices", {})
+        last = data.get("last", {})
+
+        root = field(fragment, "fragmentView")
+        if root is None:
+            return
+
+        uid_text = str(my_uid)
+        creation_words = (
+            "account created", "created on", "creation date", "account age",
+            "дата создания", "аккаунт создан", "возраст аккаунта", "создан аккаунт",
+        )
+
+        for view in self._profile_view_walk(root):
+            if not isinstance(view, TextView):
+                continue
+            try:
+                current = str(view.getText() or "")
+            except Exception:
+                continue
+            stripped = current.strip()
+            lower = stripped.casefold()
+
+            # Hide only local Extera/profile metadata. Never change the real Telegram ID.
+            id_like = (
+                stripped == uid_text
+                or bool(re.fullmatch(r"(?i)(?:user\s*)?id\s*[:#]?\s*" + re.escape(uid_text), stripped))
+            )
+            created_like = len(stripped) <= 120 and any(word in lower for word in creation_words)
+
+            if id_like or created_like:
+                try:
+                    parent = view.getParent()
+                    if parent is not None:
+                        parent.setVisibility(8)
+                    else:
+                        view.setVisibility(8)
+                except Exception:
+                    try:
+                        view.setText("")
+                    except Exception:
+                        pass
+                continue
+
+            # Add/replace local collectible-username metadata on the row where username is shown.
+            for username in names:
+                marker = "@" + username.casefold()
+                if marker not in lower and stripped.casefold() != username.casefold():
+                    continue
+
+                meta = []
+                if username in prices:
+                    meta.append("цена: " + str(prices[username]))
+                if username in last:
+                    meta.append("последняя покупка: " + str(last[username]))
+                if not meta:
+                    break
+
+                base = re.sub(r"\s+•\s+(?:цена:|последняя покупка:).*$", "", stripped, flags=re.I)
+                rendered = base + "  •  " + "  •  ".join(meta)
+                if rendered != stripped:
+                    try:
+                        view.setText(rendered)
+                    except Exception:
+                        pass
+                break
+
+
+    def user_full(self, p):
+            full = p.getResult()
+            if full is None or not self.alive or not p.args:
+                return
+            a = int(field(p.thisObject, "currentAccount", self.account()))
+            owner = int(p.args[0])
+            extra = sum(1 for r in self.visible_records(a) if r["owner"] == owner and not r["hidden"] and not r["replace"])
+            if not extra:
+                return
+            out = SerializedData()
+            inp = None
+            try:
+                full.serializeToStream(out)
+                inp = SerializedData(out.toByteArray())
+                copy = TLRPC.UserFull.TLdeserialize(inp, inp.readInt32(True), True)
+                copy.stargifts_count = int(full.stargifts_count) + extra
+                p.setResult(copy)
+            finally:
+                out.cleanup()
+                if inp is not None:
+                    inp.cleanup()
 
     def before_load(self, p):
-        # Remove overlays before native pagination computes its end condition.
-        if not bool(p.thisObject.loading) and not bool(p.thisObject.endReached):
-            self.strip(p.thisObject)
+            # Remove overlays before native pagination computes its end condition.
+            if not bool(p.thisObject.loading) and not bool(p.thisObject.endReached):
+                self.strip(p.thisObject)
 
     def total(self, p):
-        li = p.thisObject
-        a = int(li.currentAccount)
-        owner = int(li.dialogId) or self.uid(a)
-        count = sum(1 for r in self.visible_records(a) if r["owner"] == owner and not r["replace"] and self.matches(li, r))
-        from java.lang import Integer
-        p.setResult(Integer(int(p.getResult()) + count))
+            li = p.thisObject
+            a = int(li.currentAccount)
+            owner = int(li.dialogId) or self.uid(a)
+            count = sum(1 for r in self.visible_records(a) if r["owner"] == owner and not r["replace"] and self.matches(li, r))
+            from java.lang import Integer
+            p.setResult(Integer(int(p.getResult()) + count))
 
     def notification(self, p):
-        if len(p.args) == 2 and int(p.args[0]) == int(NotificationCenter.starUserGiftsLoaded):
-            args = p.args[1]
-            if len(args) > 1 and field(args[1], "gifts") is not None:
-                self.inject(args[1])
+            if len(p.args) == 2 and int(p.args[0]) == int(NotificationCenter.starUserGiftsLoaded):
+                args = p.args[1]
+                if len(args) > 1 and field(args[1], "gifts") is not None:
+                    self.inject(args[1])
+
+    def visible_records(self, a):
+        return [r for r in self.store(a)["gifts"] if row_active(r)]
 
     def refresh(self, a):
-        if self.mode():
-            for account, li in list(self.market_lists):
-                if account == a and self.strip_consumed_market(a, li):
-                    callback = field(li, "onUpdate")
-                    if callback is not None:
-                        callback.run(False)
         owners = {self.uid(a)} | {int(r["owner"]) for r in self.visible_records(a)}
         for li in list(self.lists):
-            if int(li.currentAccount) == a:
-                self.inject(li)
-                li.notifyUpdate()
-                owners.add(int(li.dialogId))
-        # Rebuild gift tabs even for a profile with zero server-side gifts.
+            try:
+                if int(li.currentAccount) == a:
+                    self.inject(li)
+                    li.notifyUpdate()
+                    owners.add(int(li.dialogId))
+            except Exception:
+                pass
+
         from java.lang import Long
         mc = jclass("org.telegram.messenger.MessagesController").getInstance(a)
         for owner in owners:
             if owner > 0:
-                full = mc.getUserFull(owner)
-                if full is not None:
-                    NotificationCenter.getInstance(a).postNotificationName(NotificationCenter.userInfoDidLoad, Long(owner), full)
-
-    def row(self, a, gift):
-        if gift is None:
-            return None
-        return next((r for r in self.store(a)["gifts"] if r["id"] == int(gift.id)), None)
-
-    def menu_start(self, p):
-        self.menu = p.thisObject
-
-    def menu_end(self, p):
-        self.menu = None
-
-    def menu_options(self, p):
-        sheet = self.menu
-        if sheet is None:
-            return
-        gift = sheet.getGift()
-        if gift is None:
-            return
-        a = int(field(sheet, "currentAccount", self.account()))
-        row = self.row(a, gift)
-        if row:
-            p.thisObject.add(0, "Fake NFT · управление", Run(lambda: self.gift_menu(a, row)))
-        elif not local_id(gift.id):
-            data = encode(gift)
-            key_source = "slug:" + source_slug(gift).lower() if source_slug(gift) else "id:" + str(int(gift.id))
-            if key_source not in self.store(a)["consumed"]:
-                p.thisObject.add(0, "Купить · Fake NFT", Run(lambda: self.add(a, decode(data), self.uid(a), "purchase")))
-
-    def buy_normal(self, p):
-        if not self.mode():
-            return
-        p.setResult(None)  # Must precede all work: errors never fall through to a real purchase.
-        a = int(field(p.thisObject, "currentAccount", self.account()))
-        if len(p.args) != 6:
-            self.info("Сигнатура покупки отличается; операция заблокирована.")
-            return
-        self.add(a, p.args[0], int(p.args[3]), "purchase")
-        if p.args[5] is not None:
-            p.args[5].run(True, None)
-
-    def buy_unique(self, p):
-        if not self.mode():
-            return
-        p.setResult(None)
-        s = p.thisObject
-        a = int(field(s, "currentAccount", self.account()))
-        owner = int(field(s, "dialogId", 0)) if bool(field(s, "resale", False)) else self.uid(a)
-        if local_id(s.getGift().id):
-            self.info("Это уже локальный подарок")
-            return
-        self.add(a, s.getGift(), owner, "purchase")
-        s.dismiss()
-
-    def buy_resale(self, p):
-        if not self.mode():
-            return
-        p.setResult(None)
-        a = int(field(p.thisObject, "currentAccount", self.account()))
-        if local_id(p.args[1].id):
-            self.info("Повторная покупка недоступна")
-            return
-        self.add(a, p.args[1], int(p.args[2]), "purchase")
-        cb = p.args[len(p.args) - 1]
-        if cb is not None:
-            cb.run(True, None)
-
-    def open_transfer(self, p):
-        sheet = p.thisObject
-        a = int(field(sheet, "currentAccount", self.account()))
-        row = self.row(a, sheet.getGift())
-        if row is None and not self.mode():
-            return
-        p.setResult(None)
-        if row is None:
-            self.info("Сначала купи NFT в Fake-режиме")
-            return
-        if not trade_allowed(row, self.uid(a)):
-            self.info("Передача недоступна для этого подарка")
-            return
-        def go(uid):
-            self.move(a, row, uid)
-            sheet.dismiss()
-        self.recipient(a, go)
-
-    def transfer_hook(self, p):
-        sheet = p.thisObject
-        a = int(field(sheet, "currentAccount", self.account()))
-        row = self.row(a, sheet.getGift())
-        if row is None and not self.mode():
-            return
-        p.setResult(None)
-        if row is None:
-            self.info("Сначала купи NFT в Fake-режиме")
-            return
-        self.move(a, row, int(p.args[0]))
-        if len(p.args) > 1 and p.args[1] is not None:
-            p.args[1].run(None)
-
-    def move(self, a, row, owner):
-        if not 0 < owner < 2**63:
-            raise ValueError("Неверный ID получателя")
-        if owner == self.uid(a):
-            raise ValueError("Подарок уже у тебя")
-        with self.lock:
-            if not trade_allowed(row, self.uid(a)):
-                raise ValueError("Передача недоступна: Custom, чужой, проданный или выставленный подарок")
-            g = decode(row["data"])
-            g.owner_id = peer(owner)
-            row.update(owner=owner, data=encode(g), replace=0, group="", state="transferred", price=0)
-            self.event(self.store(a), row, owner, "transfer")
-            self.save(a)
-        self.refresh(a)
-        self.info("Передано локально")
-        self.finish_purchase(a, row, self.store(a)["events"][-1])
-
-    def finish_purchase(self, a, row, event):
-        from org.telegram.messenger import AndroidUtilities
-        # Delay until the originating payment callback/sheet has finished.
-        def finish():
-            if not self.alive or a != self.account():
-                return
-            try:
-                f = get_last_fragment()
-                if not f:
-                    return
-                Chat = jclass("org.telegram.ui.ChatActivity")
-                target = int(event["dialog"])
-                def celebrate(chat):
-                    try:
-                        if chat is not None:
-                            from java import jarray
-                            from java.lang import Object, Long, Boolean, Integer
-                            arr = jclass("java.util.ArrayList")()
-                            messages = field(chat, "messages")
-                            exists = messages is not None and any(int(messages.get(i).getId()) == int(event["id"]) for i in range(messages.size()))
-                            if not exists:
-                                arr.add(self.message(a, event))
-                            chat.didReceivedNotification(NotificationCenter.didReceiveNewMessages, a,
-                                jarray(Object)([Long(target), arr, Boolean(False), Integer(0)]))
-                        if self.get_setting("celebrate", True):
-                            launch = jclass("org.telegram.ui.LaunchActivity").instance
-                            if launch and launch.getFireworksOverlay():
-                                launch.getFireworksOverlay().start(True)
-                        gift = decode(row["data"])
-                        doc = field(gift, "sticker")
-                        if doc is None:
-                            for i in range(gift.attributes.size()):
-                                attr = gift.attributes.get(i)
-                                if "AttributeModel" in str(attr.getClass().getSimpleName()):
-                                    doc = attr.document
-                                    break
-                        if doc is not None:
-                            factory = jclass("org.telegram.ui.Components.BulletinFactory").of(chat or f)
-                            factory.createEmojiBulletin(doc, "Подарок продан" if event["kind"] == "sale" else "Подарок передан" if event["kind"] == "transfer" else "Подарок получен", row["label"]).show(True)
-                    except Exception as e:
-                        self.error(e)
-                if not self.get_setting("open_chat", True):
-                    celebrate(None)
-                elif isinstance(f, Chat) and int(f.getDialogId()) == target:
-                    celebrate(f)
-                else:
-                    chat = Chat.of(target)
-                    chat.whenFullyVisible(Run(lambda: celebrate(chat)))
-                    f.presentFragment(chat)
-            except Exception as e:
-                self.error(e)
-                self.info("Подарок сохранён; чат не открылся")
-        AndroidUtilities.runOnUIThread(Run(finish), 350)
-
-    def network_guard(self, p):
-        if not p.args or p.args[0] is None:
-            return
-        req = p.args[0]
-        name = str(req.getClass().getSimpleName()).lower()
-        invoice = field(req, "invoice")
-        invname = str(invoice.getClass().getSimpleName()).lower() if invoice else ""
-        mutation = any(x in name for x in ("transferstargift", "savestargift", "upgradestargift", "convertstargift", "updatestargift", "toggle stargift", "craftstargift", "create stargift"))
-        mutation = mutation or ("stargift" in name and any(x in name for x in ("create", "delete", "toggle", "reorder")))
-        payment = "payment" in name and ("stargift" in name or "stargift" in invname or "send" in name)
-        ref = field(req, "stargift")
-        ref_local = ref is not None and (local_id(field(ref, "msg_id", 0)) or local_id(field(ref, "saved_id", 0)))
-        slug_local = str(field(req, "slug", "") or "").startswith("LocalGift-")
-        slug_local = slug_local or str(field(ref, "slug", "") or "").startswith("LocalGift-")
-        slug_local = slug_local or str(field(invoice, "slug", "") or "").startswith(("LocalGift-", "spaceterna-"))
-        ids = field(req, "id")
-        message_local = False
-        if any(x in name for x in ("forwardmessages", "deletemessages", "editmessage")):
-            try:
-                message_local = any(local_id(ids.get(i)) for i in range(ids.size()))
-            except Exception:
                 try:
-                    message_local = local_id(ids)
+                    full = mc.getUserFull(owner)
+                    if full is not None:
+                        NotificationCenter.getInstance(a).postNotificationName(
+                            NotificationCenter.userInfoDidLoad, Long(owner), full
+                        )
                 except Exception:
                     pass
-        if (self.mode() and (mutation or payment)) or ref_local or slug_local or message_local:
-            from java.lang import Integer
-            p.setResult(Integer(0))
-            self.info("Локальная операция: запрос к Telegram не отправлен.")
 
-    def on_send_message_hook(self, account, params):
-        reply = field(params, "replyToMsg")
-        if reply is not None and local_id(reply.getId()):
-            self.info("На локальное событие нельзя отправить сетевой ответ.")
-            return HookResult(strategy=HookStrategy.CANCEL)
-        return HookResult()
 
-    def message(self, a, event):
-        g = decode(event["gift"])
-        m = TLRPC.TL_messageService()
-        m.id = int(event["id"])
-        m.date = int(event["date"])
-        m.dialog_id = int(event["dialog"])
-        m.peer_id = peer(int(event["dialog"]))
-        m.from_id = peer(self.uid(a))
-        m.flags = 258
-        m.out = True
-        m.unread = False
-        m.send_state = 0
-        if isinstance(g, TL_stars.TL_starGiftUnique):
-            act = TLRPC.TL_messageActionStarGiftUnique()
-        else:
-            act = TLRPC.TL_messageActionStarGift()
-        act.gift = g
-        act.saved = True
-        act.transferred = event["kind"] == "transfer"
-        if event["kind"] == "sale" and isinstance(g, TL_stars.TL_starGiftUnique):
-            amount = TL_stars.TL_starsAmount()
-            amount.amount = int(event.get("amount", 0))
-            try:
-                act.resale_amount = amount
-                act.from_offer = True
-            except Exception:
-                act.resale_stars = amount.amount
-        act.flags = 4 | ((2 if isinstance(g, TL_stars.TL_starGiftUnique) else 64) if act.transferred else 0)
-        m.action = act
-        return MessageObject(a, m, True, False)
+    def row(self, a, gift):
+            if gift is None:
+                return None
+            return next((r for r in self.store(a)["gifts"] if r["id"] == int(gift.id)), None)
 
-    def chat_notification(self, p):
-        if len(p.args) != 3 or int(p.args[0]) != int(NotificationCenter.messagesDidLoad):
-            return
-        a = int(p.args[1])
-        args = p.args[2]
-        if len(args) < 15 or int(args[14]) != 0:
-            return
-        chat = p.thisObject
-        if int(args[10]) != int(field(chat, "classGuid", -1)):
-            return
-        dialog = int(field(chat, "dialog_id", 0))
-        if dialog <= 0 or int(field(chat, "threadMessageId", 0)) != 0:
-            return
-        arr = args[2]
-        # Inject only into newest/initial loads, never into historical pagination.
-        if int(args[8]) not in (0, 2) or int(args[4]) != 0:
-            return
-        events = [e for e in self.store(a)["events"] if e["dialog"] == dialog and e["kind"] in ("purchase", "transfer", "sale")]
-        existing = {int(arr.get(i).getId()) for i in range(arr.size())}
-        if not bool(field(chat, "clearOnLoad", False)):
-            loaded = field(chat, "messages")
-            if loaded is not None:
-                existing.update(int(loaded.get(i).getId()) for i in range(loaded.size()))
-        for event in events:
-            if event["id"] in existing:
-                continue
-            obj = self.message(a, event)
-            pos = 0
-            while pos < arr.size() and int(arr.get(pos).messageOwner.date) > event["date"]:
-                pos += 1
-            arr.add(pos, obj)
-            existing.add(event["id"])
-
-    def collection(self, a, group=None, query="", page=0):
-        db = self.store(a)
-        rows = [r for r in db["gifts"] if row_active(r) and r["owner"] == self.uid(a)
-                and (group is None or r["group"] == group) and self.search_match(r["data"], query)]
-        order = db.get("group_order", {}).get(group or "", [])
-        rank = {x: i for i, x in enumerate(order)}
-        rows.sort(key=lambda r: rank.get(r["id"], len(rank)))
-        self.gallery(a, group or "Коллекция", rows, lambda row: self.gift_menu(a, row, group), page,
-            search=lambda: self.form("Поиск", [("Модель / фон / название / номер", query)],
-                        lambda v: self.collection(a, group, v[0])),
-            paginate=lambda n: self.collection(a, group, query, n))
-
-    def gift_menu(self, a, row, group=None):
-        actions = [("Карточка", lambda: self.open_card(a, row)),
-                   ("Информация", lambda: self.dialog("Fake NFT", row["label"] + "\n" + row["public_id"] +
-                    "\nТип: " + ("Custom" if row.get("custom", True) else "Исходный NFT") +
-                    "\nСтатус: " + row.get("state", "owned") + "\nВладелец: " + str(row["owner"])))]
-        mine = row["owner"] == self.uid(a) and not row.get("preview_only") and row_active(row)
-        if mine:
-            actions += [("Группа", lambda: self.assign_group(a, row)),
-                        ("Позиция", lambda: self.local_position(a, row, group)),
-                        ("Показать" if row["hidden"] else "Скрыть", lambda: self.toggle_hidden(a, row))]
-            if trade_allowed(row, self.uid(a)):
-                actions += [("Передать", lambda: self.recipient(a, lambda uid: self.move(a, row, uid))),
-                            ("Выставить на продажу", lambda: self.list_dialog(a, row)),
-                            ("Ссылка spaceterna", lambda: self.copy_link(a, row))]
-            elif row.get("state") == "listed":
-                actions += [("Снять с продажи", lambda: self.unlist(a, row)),
-                            ("Изменить цену", lambda: self.list_dialog(a, row)),
-                            ("Продать локально", lambda: self.recipient(a, lambda uid: self.sale(a, row, uid))),
-                            ("Ссылка spaceterna", lambda: self.copy_link(a, row))]
-            if row.get("state") == "owned":
-                actions += [("Создать Custom", lambda: self.customize(a, row))]
-                if not row.get("source_slug"):
-                    actions += [("Проверить исходную ссылку", lambda: self.verify_origin(a, row))]
-            actions += [("Удалить Fake NFT", lambda: self.remove(a, row))]
-        self.dialog(row["label"], items=[x[0] for x in actions], action=lambda i: actions[i][1]())
-
-    def assign_group(self, a, row):
-        names = [""] + list(self.store(a)["groups"])
-        def select(i):
-            row["group"] = names[i]
-            self.save(a)
-            self.info("Группа изменена")
-        self.dialog("Группа", items=["Без группы"] + names[1:], action=select)
-
-    def local_position(self, a, row, group=None):
-        db = self.store(a)
-        rows = [r for r in db["gifts"] if group is None or r["group"] == group]
-        prior = db.get("group_order", {}).get(group or "", [])
-        rank = {x: i for i, x in enumerate(prior)}
-        rows.sort(key=lambda r: rank.get(r["id"], len(rank)))
-        def put(v):
-            pos = int(v[0])
-            if not 1 <= pos <= len(rows):
-                raise ValueError("Позиция от 1 до " + str(len(rows)))
-            ids = [r["id"] for r in rows if r["id"] != row["id"]]
-            ids.insert(pos - 1, row["id"])
-            db.setdefault("group_order", {})[group or ""] = ids
-            self.save(a)
-            self.info("Порядок сохранён")
-        self.form("Позиция в списке", [("От 1 до " + str(len(rows)), "1")], put)
-
-    def profile_order(self, a):
-        owners = sorted({r["owner"] for r in self.store(a)["gifts"]} | {self.uid(a)})
-        self.dialog("Профиль", items=["Мой" if uid == self.uid(a) else str(uid) for uid in owners],
-                    action=lambda i: self.order_owner(a, owners[i]))
-
-    def order_owner(self, a, owner):
-        li = SC.getInstance(a).getProfileGiftsList(owner)
-        self.inject(li)
-        gifts = [li.gifts.get(i) for i in range(li.gifts.size())]
-        def select(i):
-            selected = gifts[i]
-            tier = [g for g in gifts if bool(g.pinned_to_top) == bool(selected.pinned_to_top)]
-            def setpos(v):
-                pos = int(v[0])
-                if not 1 <= pos <= len(tier):
-                    raise ValueError("Позиция от 1 до " + str(len(tier)))
-                ids = [int(g.gift.id) for g in tier if int(g.gift.id) != int(selected.gift.id)]
-                ids.insert(pos - 1, int(selected.gift.id))
-                other = [int(g.gift.id) for g in gifts if bool(g.pinned_to_top) != bool(selected.pinned_to_top)]
-                order = ids + other if bool(selected.pinned_to_top) else other + ids
-                self.store(a).setdefault("profile_order", {})[str(owner)] = order
-                self.save(a)
-                self.refresh(a)
-                self.info("Порядок сохранён")
-            self.form("Среди " + ("закреплённых" if selected.pinned_to_top else "остальных"),
-                      [("Позиция 1–" + str(len(tier)), str(tier.index(selected) + 1))], setpos)
-        self.pages("Порядок загруженных подарков", [("📌 " if g.pinned_to_top else "") + self.label(g.gift) for g in gifts], select)
-
-    def open_card(self, a, row):
-        f = get_last_fragment()
-        s = Sheet(f.getParentActivity(), a, int(row["owner"]), f.getResourceProvider())
-        s.set(self.saved(row), SC.getInstance(a).getProfileGiftsList(int(row["owner"])))
-        s.show()
-
-    def edit(self, a, row):
-        g = decode(row["data"])
-        unique = isinstance(g, TL_stars.TL_starGiftUnique)
-        def update(v):
-            number = int(v[1])
-            if not 0 <= number <= 2147483647:
-                raise ValueError("Номер от 0 до 2147483647")
-            if unique:
-                g.title, g.num = v[0][:120], number
-                row.update(data=encode(g), label=self.label(g), custom=True, price=0)
-            else:
-                row["label"] = v[0][:120]
-            self.save(a)
-            self.refresh(a)
-            self.info("Сохранено")
-        self.form("Название / номер", [("Название", str(g.title or row["label"])),
-                  ("Номер NFT", str(g.num if unique else 0))], update)
-
-    def appearance(self, a, row):
-        g = decode(row["data"])
-        if not isinstance(g, TL_stars.TL_starGiftUnique):
-            self.info("Внешний вид меняется у NFT. Добавь коллекционный подарок.")
-            return
-        self.dialog("Внешний вид", items=["Модель", "Узор", "Фон", "Свой цвет фона", "Предпросмотр"],
-            action=lambda i: self.pick_attribute(a, row, ["Model", "Pattern", "Backdrop"][i]) if i < 3 else
-                self.custom_backdrop(a, row) if i == 3 else self.open_card(a, row))
-
-    def pick_attribute(self, a, row, kind):
-        g = decode(row["data"])
-        base_id = int(field(g, "gift_id", 0))
-        def show(attributes):
-            choices = []
-            seen = set()
-            def append(attr):
-                if "Attribute" + kind not in str(attr.getClass().getSimpleName()):
-                    return
-                label = str(field(attr, "name", "") or kind)
-                if label not in seen:
-                    choices.append(attr)
-                    seen.add(label)
-            for i in range(g.attributes.size()):
-                append(g.attributes.get(i))
-            for attr in attributes:
-                append(attr)
-            # Last viewed NFT provides a second explicit source for mixing styles.
-            if self.last and self.last[0] == a:
-                other = decode(self.last[1])
-                for i in range(other.attributes.size()):
-                    append(other.attributes.get(i))
-            def select(i):
-                candidate = decode(row["data"])
-                for j in range(candidate.attributes.size() - 1, -1, -1):
-                    if "Attribute" + kind in str(candidate.attributes.get(j).getClass().getSimpleName()):
-                        candidate.attributes.remove(j)
-                candidate.attributes.add(choices[i])
-                row["data"] = encode(candidate)
-                row["custom"] = True
-                self.save(a)
-                self.refresh(a)
-                self.info("Сохранено: " + str(choices[i].name))
-                self.open_card(a, row)
-            self.pages({"Model": "Модель", "Pattern": "Узор", "Backdrop": "Фон"}[kind],
-                       [str(x.name) for x in choices], select)
-        if base_id <= 0:
-            self.info("Нет ID коллекции; доступны текущий и последний открытый NFT")
-            show([])
-            return
-        req = TL_stars.getStarGiftUpgradePreview()
-        req.gift_id = base_id
-        def got(res, err):
-            if not self.alive:
+    def buy_normal(self, p):
+            if not self.mode():
                 return
-            attrs = field(res, "sample_attributes")
-            values = [attrs.get(i) for i in range(attrs.size())] if attrs is not None else []
-            if err:
-                self.info("Каталог недоступен; использую открытые карточки")
-            run_on_ui_thread(lambda: show(values))
-        send_request(req, got, account=a)
-        self.info("Загрузка вариантов…")
-
-    def custom_backdrop(self, a, row):
-        g = decode(row["data"])
-        bg = next((g.attributes.get(i) for i in range(g.attributes.size())
-                   if "AttributeBackdrop" in str(g.attributes.get(i).getClass().getSimpleName())), None)
-        if bg is None:
-            self.info("У этого шаблона нет фона")
-            return
-        fields = [("Название", str(bg.name))] + [(title, "%06X" % (int(getattr(bg, name)) & 0xFFFFFF))
-                  for title, name in [("Центр HEX", "center_color"), ("Край HEX", "edge_color"),
-                                      ("Узор HEX", "pattern_color"), ("Текст HEX", "text_color")]]
-        def update(v):
-            if any(not re.fullmatch(r"#?[0-9a-fA-F]{6}", x) for x in v[1:]):
-                raise ValueError("Цвет: 6 HEX-цифр, например A77BFF")
-            bg.name = v[0][:80]
-            for name, value in zip(["center_color", "edge_color", "pattern_color", "text_color"], v[1:]):
-                setattr(bg, name, int(value.lstrip("#"), 16))
-            row["data"] = encode(g)
-            row["custom"] = True
-            self.save(a)
-            self.refresh(a)
-            self.info("Фон сохранён")
-        self.form("Свой фон", fields, update)
-
-    def remove(self, a, row, sheet=None):
-        def confirm(i):
-            if i:
+            p.setResult(None)  # Must precede all work: errors never fall through to a real purchase.
+            a = int(field(p.thisObject, "currentAccount", self.account()))
+            if len(p.args) != 6:
+                self.info("Сигнатура покупки отличается; операция заблокирована.")
                 return
-            with self.lock:
-                if row.get("preview_only") or row["owner"] != self.uid(a):
-                    raise ValueError("Это не твой подарок")
-                row["state"] = "deleted"
-                row["price"] = 0
-                self.save(a)
-            if sheet:
-                sheet.dismiss()
-            for li in self.lists:
-                if int(li.currentAccount) == a:
-                    self.strip(li)
-                    li.invalidate(True)
-            self.refresh(a)
-            self.info("Удалён. История покупки сохранена.")
-        self.dialog("Удалить подарок?", items=["Удалить", "Отмена"], action=confirm)
+            self.add(a, p.args[0], int(p.args[3]), "purchase")
+            if p.args[5] is not None:
+                p.args[5].run(True, None)
 
-    def visible_records(self, a):
-        db = self.store(a)
-        rows = [r for r in db["gifts"] if row_active(r)]
-        for snapshots in db.get("shared_profiles", {}).values():
-            rows.extend(r for r in snapshots if row_active(r))
-        return rows
+    def buy_unique(self, p):
+            if not self.mode():
+                return
+            p.setResult(None)
+            s = p.thisObject
+            a = int(field(s, "currentAccount", self.account()))
+            owner = int(field(s, "dialogId", 0)) if bool(field(s, "resale", False)) else self.uid(a)
+            if local_id(s.getGift().id):
+                self.info("Это уже локальный подарок")
+                return
+            self.add(a, s.getGift(), owner, "purchase")
+            s.dismiss()
 
-    def register_menus(self):
-        for kind in (MenuItemType.CHAT_ACTION_MENU, MenuItemType.PROFILE_ACTION_MENU):
-            self.add_menu_item(MenuItemData(menu_type=kind, text="Fake NFT", icon="msg_gift",
-                on_click=self.menu_dashboard))
-        self.add_menu_item(MenuItemData(menu_type=MenuItemType.MESSAGE_CONTEXT_MENU,
-            text="Открыть Fake NFT", icon="msg_gift", on_click=self.message_link))
+    def buy_resale(self, p):
+            if not self.mode():
+                return
+            p.setResult(None)
+            a = int(field(p.thisObject, "currentAccount", self.account()))
+            if local_id(p.args[1].id):
+                self.info("Повторная покупка недоступна")
+                return
+            self.add(a, p.args[1], int(p.args[2]), "purchase")
+            cb = p.args[len(p.args) - 1]
+            if cb is not None:
+                cb.run(True, None)
 
-    def menu_dashboard(self, context):
-        a = int(context.get("account", self.account()))
-        self.dashboard(a)
-
-    def message_link(self, context):
-        a = int(context.get("account", self.account()))
-        obj = context.get("message")
-        text = str(field(obj, "messageText", "") or "")
-        match = re.search(r"https?://(?:t\.me|telegram\.me)/nft/spaceterna-[^\s<>]+", text)
-        if match:
-            self.load_link(a, match.group(0))
-        else:
-            self.info("В сообщении нет ссылки spaceterna")
-
-    def browser_link(self, p):
-        value = next((str(x) for x in p.args if x is not None and "/nft/spaceterna-" in str(x)), "")
-        if not value:
-            return
-        p.setResult(None)
-        self.load_link(self.account(), value)
-
-    def local_sheet(self, p):
-        sheet = p.thisObject
-        a = int(field(sheet, "currentAccount", self.account()))
-        return a, self.row(a, sheet.getGift())
-
-    def link_hook(self, p):
-        a, row = self.local_sheet(p)
-        if row is not None:
-            p.setResult(self.make_link(row) if self.share_allowed(row) else None)
-        else:
-            gift = p.thisObject.getGift()
-            if gift is not None and local_id(gift.id):
-                p.setResult(None)
-
-    def share_hook(self, p):
-        a, row = self.local_sheet(p)
-        gift = p.thisObject.getGift()
-        if row is None and (gift is None or not local_id(gift.id)):
-            return
-        p.setResult(None)
-        if row is None or not self.share_allowed(row):
-            self.info("У Custom и снимков нет передаваемой ссылки")
-        else:
-            self.copy_link(a, row)
-
-    def can_transfer(self, p):
-        a, row = self.local_sheet(p)
-        gift = p.thisObject.getGift()
-        if row is not None or (gift is not None and local_id(gift.id)):
-            from java.lang import Boolean
-            p.setResult(Boolean(bool(row and trade_allowed(row, self.uid(a)))))
-
-    def sell_hook(self, p):
-        a, row = self.local_sheet(p)
-        if row is not None or self.mode():
+    def open_transfer(self, p):
+            sheet = p.thisObject
+            a = int(field(sheet, "currentAccount", self.account()))
+            row = self.row(a, sheet.getGift())
+            if row is None and not self.mode():
+                return
             p.setResult(None)
             if row is None:
-                self.info("Сначала купи подарок в Fake NFT")
-            else:
-                self.list_dialog(a, row)
+                self.info("Сначала купи NFT в Fake-режиме")
+                return
+            if not trade_allowed(row, self.uid(a)):
+                self.info("Передача недоступна для этого подарка")
+                return
+            def go(uid):
+                self.move(a, row, uid)
+                sheet.dismiss()
+            self.recipient(a, go)
 
-    def no_local_craft(self, p):
-        a, row = self.local_sheet(p)
-        gift = p.thisObject.getGift()
-        if row is not None or (gift is not None and local_id(gift.id)):
-            from java.lang import Boolean
-            p.setResult(Boolean(False))
-
-    def block_local_craft(self, p):
-        a, row = self.local_sheet(p)
-        if row or self.mode():
+    def transfer_hook(self, p):
+            sheet = p.thisObject
+            a = int(field(sheet, "currentAccount", self.account()))
+            row = self.row(a, sheet.getGift())
+            if row is None and not self.mode():
+                return
             p.setResult(None)
-            self.info("Крафты и улучшения будут позже")
+            if row is None:
+                self.info("Сначала купи NFT в Fake-режиме")
+                return
+            self.move(a, row, int(p.args[0]))
+            if len(p.args) > 1 and p.args[1] is not None:
+                p.args[1].run(None)
 
-    def share_allowed(self, row):
-        return (not row.get("custom", True) and not row.get("preview_only", False)
-                and row.get("state", "owned") in ("owned", "listed", "transferred", "sold")
-                and bool(row.get("source_slug")))
-
-    def make_link(self, row):
-        if not self.share_allowed(row):
-            raise ValueError("Ссылка недоступна для Custom")
-        return "https://t.me/nft/spaceterna-" + row["source_slug"] + "?" + urllib.parse.urlencode({
-            "owner": str(row["owner"]), "fn": row["public_id"]})
-
-    def copy_link(self, a, row):
-        from org.telegram.messenger import AndroidUtilities
-        AndroidUtilities.addToClipboard(self.make_link(row))
-        self.info("Ссылка Fake NFT скопирована")
-
-    def preview_shared(self, a, gift, slug, owner, public):
-        db = self.store(a)
-        own = next((r for r in db["gifts"] if r["public_id"] == public and r["source_slug"].lower() == slug.lower()), None)
-        if own:
-            self.open_card(a, own)
-            return
-        def save_snapshot():
+    def move(self, a, row, owner):
+            if not 0 < owner < 2**63:
+                raise ValueError("Неверный ID получателя")
+            if owner == self.uid(a):
+                raise ValueError("Подарок уже у тебя")
             with self.lock:
-                rows = db["shared_profiles"].setdefault(str(owner), [])
-                if len(rows) >= 100 and not any(r["public_id"] == public for r in rows):
-                    raise ValueError("Не более 100 снимков одного профиля")
-                existing = next((r for r in rows if r["public_id"] == public), None)
-                n = existing["id"] if existing else self.next_id(db)
-                g = decode(encode(gift))
-                g.id = n
-                g.slug = "LocalGift-" + str(-n)
+                if not trade_allowed(row, self.uid(a)):
+                    raise ValueError("Передача недоступна: Custom, чужой, проданный или выставленный подарок")
+                g = decode(row["data"])
                 g.owner_id = peer(owner)
-                g.flags = (int(g.flags) | 1) & ~6
-                g.owner_address = None
-                g.owner_name = None
-                g.resell_amount = None
-                row = {"id": n, "owner": owner, "public_id": public, "source_slug": slug,
-                       "data": encode(g), "date": int(time.time()), "label": self.label(g),
-                       "group": "", "hidden": False, "replace": 0, "state": "owned", "custom": False,
-                       "preview_only": True, "price": 0}
-                rows[:] = [r for r in rows if r["public_id"] != public]
-                rows.append(row)
+                row.update(owner=owner, data=encode(g), replace=0, group="", state="transferred", price=0)
+                self.event(self.store(a), row, owner, "transfer")
                 self.save(a)
             self.refresh(a)
-            self.open_card(a, row)
-        self.dialog(self.label(gift), items=["Сохранить снимок профиля", "Отмена"],
-                    action=lambda i: save_snapshot() if i == 0 else None)
-        self.info("Заявленный владелец: " + str(owner) + ". Это не подтверждение владения.")
+            self.info("Передано локально")
+            self.finish_purchase(a, row, self.store(a)["events"][-1])
 
-    def verify_origin(self, a, row):
-        def go(v):
-            slug, owner, public = parsed_nft_link(v[0])
-            if owner:
-                raise ValueError("Нужна исходная ссылка Telegram без spaceterna")
-            req = TL_stars.getUniqueStarGift()
-            req.slug = slug
-            def got(res, err):
-                if not self.alive:
+    def finish_purchase(self, a, row, event):
+            from org.telegram.messenger import AndroidUtilities
+            # Delay until the originating payment callback/sheet has finished.
+            def finish():
+                if not self.alive or a != self.account():
                     return
-                if err or res is None or field(res, "gift") is None:
-                    self.info("Карточка недоступна")
-                    return
-                data = encode(res.gift)
-                def apply():
-                    original = decode(data)
-                    local = decode(row["data"])
-                    if appearance_key(original) != appearance_key(local):
-                        self.info("Внешность отличается. Этот подарок остаётся Custom.")
+                try:
+                    f = get_last_fragment()
+                    if not f:
                         return
-                    key = "slug:" + slug.lower()
-                    other = self.store(a)["consumed"].get(key)
-                    if other and other != row["public_id"]:
-                        self.info("Этот NFT уже есть в коллекции")
-                        return
-                    row.update(source_slug=slug, source_key=key, custom=False)
-                    self.store(a)["consumed"][key] = row["public_id"]
-                    self.save(a)
-                    self.info("Исходная карточка подтверждена")
-                run_on_ui_thread(apply)
-            send_request(req, got, account=a)
-        self.form("Исходный NFT", [("Ссылка Telegram", "")], go)
+                    Chat = jclass("org.telegram.ui.ChatActivity")
+                    target = int(event["dialog"])
+                    def celebrate(chat):
+                        try:
+                            if chat is not None:
+                                from java import jarray
+                                from java.lang import Object, Long, Boolean, Integer
+                                arr = jclass("java.util.ArrayList")()
+                                messages = field(chat, "messages")
+                                exists = messages is not None and any(int(messages.get(i).getId()) == int(event["id"]) for i in range(messages.size()))
+                                if not exists:
+                                    arr.add(self.message(a, event))
+                                chat.didReceivedNotification(NotificationCenter.didReceiveNewMessages, a,
+                                    jarray(Object)([Long(target), arr, Boolean(False), Integer(0)]))
+                            if self.get_setting("celebrate", True):
+                                launch = jclass("org.telegram.ui.LaunchActivity").instance
+                                if launch and launch.getFireworksOverlay():
+                                    launch.getFireworksOverlay().start(True)
+                            gift = decode(row["data"])
+                            doc = field(gift, "sticker")
+                            if doc is None:
+                                for i in range(gift.attributes.size()):
+                                    attr = gift.attributes.get(i)
+                                    if "AttributeModel" in str(attr.getClass().getSimpleName()):
+                                        doc = attr.document
+                                        break
+                            if doc is not None:
+                                factory = jclass("org.telegram.ui.Components.BulletinFactory").of(chat or f)
+                                factory.createEmojiBulletin(doc, "Подарок продан" if event["kind"] == "sale" else "Подарок передан" if event["kind"] == "transfer" else "Подарок получен", row["label"]).show(True)
+                        except Exception as e:
+                            self.error(e)
+                    if not self.get_setting("open_chat", True):
+                        celebrate(None)
+                    elif isinstance(f, Chat) and int(f.getDialogId()) == target:
+                        celebrate(f)
+                    else:
+                        chat = Chat.of(target)
+                        chat.whenFullyVisible(Run(lambda: celebrate(chat)))
+                        f.presentFragment(chat)
+                except Exception as e:
+                    self.error(e)
+                    self.info("Подарок сохранён; чат не открылся")
+            AndroidUtilities.runOnUIThread(Run(finish), 350)
 
-    def customize(self, a, row):
-        if row.get("state") != "owned" or row["owner"] != self.uid(a):
-            self.info("Сначала сними подарок с продажи")
-            return
-        def confirm(i):
-            if i:
+    def network_guard(self, p):
+            if not p.args or p.args[0] is None:
                 return
-            row["custom"] = True
-            row["price"] = 0
-            self.save(a)
-            self.refresh(a)
-            self.dialog("Custom · нельзя передать", items=["Модель / фон / узор", "Номер / название"],
-                        action=lambda k: self.appearance(a, row) if k == 0 else self.edit(a, row))
-        self.dialog("Сделать Custom?", items=["Да · без ссылки и передачи", "Отмена"], action=confirm)
+            req = p.args[0]
+            name = str(req.getClass().getSimpleName()).lower()
+            invoice = field(req, "invoice")
+            invname = str(invoice.getClass().getSimpleName()).lower() if invoice else ""
+            mutation = any(x in name for x in ("transferstargift", "savestargift", "upgradestargift", "convertstargift", "updatestargift", "toggle stargift", "craftstargift", "create stargift"))
+            mutation = mutation or ("stargift" in name and any(x in name for x in ("create", "delete", "toggle", "reorder")))
+            payment = "payment" in name and ("stargift" in name or "stargift" in invname or "send" in name)
+            ref = field(req, "stargift")
+            ref_local = ref is not None and (local_id(field(ref, "msg_id", 0)) or local_id(field(ref, "saved_id", 0)))
+            slug_local = str(field(req, "slug", "") or "").startswith("LocalGift-")
+            slug_local = slug_local or str(field(ref, "slug", "") or "").startswith("LocalGift-")
+            slug_local = slug_local or str(field(invoice, "slug", "") or "").startswith(("LocalGift-", "spaceterna-"))
+            ids = field(req, "id")
+            message_local = False
+            if any(x in name for x in ("forwardmessages", "deletemessages", "editmessage")):
+                try:
+                    message_local = any(local_id(ids.get(i)) for i in range(ids.size()))
+                except Exception:
+                    try:
+                        message_local = local_id(ids)
+                    except Exception:
+                        pass
+            if (self.mode() and (mutation or payment)) or ref_local or slug_local or message_local:
+                from java.lang import Integer
+                p.setResult(Integer(0))
+                self.info("Локальная операция: запрос к Telegram не отправлен.")
 
-    def toggle_hidden(self, a, row):
-        row["hidden"] = not row["hidden"]
-        self.save(a)
-        self.refresh(a)
+    def on_send_message_hook(self, account, params):
+            reply = field(params, "replyToMsg")
+            if reply is not None and local_id(reply.getId()):
+                self.info("На локальное событие нельзя отправить сетевой ответ.")
+                return HookResult(strategy=HookStrategy.CANCEL)
+            return HookResult()
 
-    def list_dialog(self, a, row):
-        if not (trade_allowed(row, self.uid(a)) or (row.get("state") == "listed" and row["owner"] == self.uid(a)
-                and not row.get("custom", True) and not row.get("preview_only"))):
-            self.info("Продажа недоступна для этого подарка")
-            return
-        self.form("Цена · виртуальные ★", [("Цена в звёздах", str(row.get("price") or 100))],
-                  lambda v: self.list_gift(a, row, int(v[0])))
-
-    def list_gift(self, a, row, price):
-        if not 0 < price <= 10**12:
-            raise ValueError("Цена от 1 до 1 000 000 000 000 ★")
-        with self.lock:
-            if row["owner"] != self.uid(a) or row.get("custom", True) or row.get("preview_only") or not row.get("source_slug") or row.get("state") not in ("owned", "listed"):
-                raise ValueError("Подарок нельзя выставить")
-            row.update(state="listed", price=price)
-            self.event(self.store(a), row, self.uid(a), "list", amount=price)
-            self.save(a)
-        self.refresh(a)
-        self.info("Выставлен локально: " + str(price) + " ★")
-
-    def unlist(self, a, row):
-        if row.get("state") != "listed" or row["owner"] != self.uid(a):
-            raise ValueError("Подарок не выставлен")
-        row.update(state="owned", price=0)
-        self.event(self.store(a), row, self.uid(a), "unlist")
-        self.save(a)
-        self.refresh(a)
-        self.info("Снят с продажи")
-
-    def sale(self, a, row, buyer):
-        if buyer == self.uid(a) or not 0 < buyer < 2**63:
-            raise ValueError("Нужен другой пользователь")
-        with self.lock:
-            if row.get("state") != "listed" or row["owner"] != self.uid(a) or row.get("custom", True) or row.get("preview_only"):
-                raise ValueError("Продажа недоступна")
-            price = int(row["price"])
-            g = decode(row["data"])
-            g.owner_id = peer(buyer)
-            row.update(data=encode(g), owner=buyer, state="sold", price=0, group="", replace=0)
-            self.event(self.store(a), row, buyer, "sale", amount=price)
-            self.save(a)
-        self.refresh(a)
-        self.finish_purchase(a, row, self.store(a)["events"][-1])
-        self.info("Продан локально за " + str(price) + " ★")
-
-    def statistics(self, a):
-        db = self.store(a)
-        mine = [r for r in db["gifts"] if r["owner"] == self.uid(a) and row_active(r)]
-        events = db["events"]
-        bought = sum(e["kind"] == "purchase" for e in events)
-        sent = sum(e["kind"] == "transfer" for e in events)
-        sales = [e for e in events if e["kind"] == "sale"]
-        earned = sum(e.get("amount", 0) for e in sales)
-        spent = sum(e.get("amount", 0) for e in events if e["kind"] == "purchase")
-        self.dialog("Статистика · виртуально", "В коллекции: " + str(len(mine)) +
-            "\nCustom: " + str(sum(r.get("custom", True) for r in mine)) +
-            "\nНа продаже: " + str(sum(r.get("state") == "listed" for r in mine)) +
-            "\nКуплено: " + str(bought) + "\nПередано: " + str(sent) + "\nПродано: " + str(len(sales)) +
-            "\nПотрачено: " + str(spent) + " ★\nВыручка: " + str(earned) + " ★\nРазница: " + str(earned - spent) + " ★")
-
-    def strip_consumed_market(self, a, li):
-        consumed = self.store(a)["consumed"]
-        changed = False
-        for i in range(li.gifts.size() - 1, -1, -1):
-            gift = li.gifts.get(i)
-            if "slug:" + source_slug(gift).lower() in consumed or "id:" + str(int(gift.id)) in consumed:
-                li.gifts.remove(i)
-                changed = True
-        return changed
-
-    def filter_market_items(self, p):
-        if not self.mode():
-            return
-        li = field(p.thisObject, "list")
-        if li is None or field(li, "gifts") is None:
-            return
-        a = int(field(li, "account", self.account()))
-        if not any(x == li for account, x in self.market_lists):
-            self.market_lists.append((a, li))
-        self.strip_consumed_market(a, li)
-
-    def groups(self, a):
-        groups = list(self.store(a)["groups"])
-        def select(i):
-            if i == 0:
-                def create(v):
-                    name = v[0][:40]
-                    if not name:
-                        raise ValueError("Введи название")
-                    if name not in self.store(a)["groups"]:
-                        self.store(a)["groups"].append(name)
-                        self.save(a)
-                self.form("Новая группа", [("Название", "")], create)
+    def message(self, a, event):
+            g = decode(event["gift"])
+            m = TLRPC.TL_messageService()
+            m.id = int(event["id"])
+            m.date = int(event["date"])
+            m.dialog_id = int(event["dialog"])
+            m.peer_id = peer(int(event["dialog"]))
+            m.from_id = peer(self.uid(a))
+            m.flags = 258
+            m.out = True
+            m.unread = False
+            m.send_state = 0
+            if isinstance(g, TL_stars.TL_starGiftUnique):
+                act = TLRPC.TL_messageActionStarGiftUnique()
             else:
-                self.group_menu(a, groups[i - 1])
-        self.dialog("Группы", items=["＋ Создать"] + groups, action=select)
+                act = TLRPC.TL_messageActionStarGift()
+            act.gift = g
+            act.saved = True
+            act.transferred = event["kind"] == "transfer"
+            if event["kind"] == "sale" and isinstance(g, TL_stars.TL_starGiftUnique):
+                amount = TL_stars.TL_starsAmount()
+                amount.amount = int(event.get("amount", 0))
+                try:
+                    act.resale_amount = amount
+                    act.from_offer = True
+                except Exception:
+                    act.resale_stars = amount.amount
+            act.flags = 4 | ((2 if isinstance(g, TL_stars.TL_starGiftUnique) else 64) if act.transferred else 0)
+            m.action = act
+            return MessageObject(a, m, True, False)
 
-    def group_menu(self, a, name):
-        def rename(v):
-            new = v[0][:40]
-            db = self.store(a)
-            if not new or (new != name and new in db["groups"]):
-                raise ValueError("Название пустое или уже занято")
-            db["groups"] = [new if x == name else x for x in db["groups"]]
-            for r in db["gifts"]:
-                if r["group"] == name:
-                    r["group"] = new
-            order = db.setdefault("group_order", {})
-            order[new] = order.pop(name, [])
-            self.save(a)
-        def delete():
-            db = self.store(a)
-            db["groups"] = [x for x in db["groups"] if x != name]
-            for r in db["gifts"]:
-                if r["group"] == name:
-                    r["group"] = ""
-            db.setdefault("group_order", {}).pop(name, None)
-            self.save(a)
-            self.info("Группа удалена; подарки сохранены")
-        self.dialog(name, items=["Подарки / порядок", "Переименовать", "Удалить группу"],
-            action=lambda i: self.collection(a, name) if i == 0 else
-                self.form("Переименовать", [("Название", name)], rename) if i == 1 else
-                self.dialog("Удалить группу?", items=["Удалить", "Отмена"], action=lambda k: delete() if k == 0 else None))
-
-    def history(self, a):
-        events = self.store(a)["events"][-100:]
-        names = {"purchase": "Покупка", "transfer": "Передача", "sale": "Продажа", "list": "Выставлен", "unlist": "Снят с продажи"}
-        text = "\n\n".join(time.strftime("%d.%m %H:%M", time.localtime(e["date"])) + " · " + names.get(e["kind"], "Добавление") +
-                "\n" + e["label"] + (" · " + str(e.get("amount", 0)) + " ★" if e.get("amount") else "") for e in reversed(events))
-        self.dialog("История · локально", text or "История пуста")
+    def chat_notification(self, p):
+            if len(p.args) != 3 or int(p.args[0]) != int(NotificationCenter.messagesDidLoad):
+                return
+            a = int(p.args[1])
+            args = p.args[2]
+            if len(args) < 15 or int(args[14]) != 0:
+                return
+            chat = p.thisObject
+            if int(args[10]) != int(field(chat, "classGuid", -1)):
+                return
+            dialog = int(field(chat, "dialog_id", 0))
+            if dialog <= 0 or int(field(chat, "threadMessageId", 0)) != 0:
+                return
+            arr = args[2]
+            # Inject only into newest/initial loads, never into historical pagination.
+            if int(args[8]) not in (0, 2) or int(args[4]) != 0:
+                return
+            events = [e for e in self.store(a)["events"] if e["dialog"] == dialog and e["kind"] in ("purchase", "transfer", "sale")]
+            existing = {int(arr.get(i).getId()) for i in range(arr.size())}
+            if not bool(field(chat, "clearOnLoad", False)):
+                loaded = field(chat, "messages")
+                if loaded is not None:
+                    existing.update(int(loaded.get(i).getId()) for i in range(loaded.size()))
+            for event in events:
+                if event["id"] in existing:
+                    continue
+                obj = self.message(a, event)
+                pos = 0
+                while pos < arr.size() and int(arr.get(pos).messageOwner.date) > event["date"]:
+                    pos += 1
+                arr.add(pos, obj)
+                existing.add(event["id"])
 
     def on_plugin_unload(self):
         self.alive = False
         self.ready = False
-        # Clear native overlays; retained JSON is restored when enabled again.
         lists = list(self.lists)
-        market_lists = list(self.market_lists)
+
         def clean():
-            for account, li in market_lists:
-                try:
-                    li.reload()
-                except Exception:
-                    pass
             for li in lists:
                 try:
                     self.strip(li)
                     li.invalidate(True)
                 except Exception:
                     pass
+
         run_on_ui_thread(clean)
-        self.menu = None
-        self.last = None
